@@ -151,11 +151,22 @@ TOOLS = [
 # handlers
 # ---------------------------------------------------------------------------
 
+GENERIC_SOCIAL_TOKENS = {"热点", "新闻", "事件", "舆情"}
+
+
 def _auto_scope(query: str, domain: str | None) -> tuple[str, dict]:
     if domain and domain not in ("auto", ""):
         return ("broad" if domain == "broad" else domain), {"source": "explicit"}
     verdict = classify_request(query or "", None)
     matched = verdict.get("matched") or {}
+    # "AI 圈有什么热点" hits ai + social only because 热点 is a request-style
+    # word, not because the user asked for social news. Drop social when its
+    # only hit is generic news vocabulary.
+    if (len(matched) == 2 and "social" in matched
+            and set(matched["social"]) <= GENERIC_SOCIAL_TOKENS):
+        other = next(k for k in matched if k != "social")
+        return other, {**verdict, "source": "auto",
+                       "note": "social dropped: matched only generic news words"}
     if verdict["verdict"] == "classifier" and len(matched) == 1 and verdict["confidence"] >= 0.7:
         return next(iter(matched)), {**verdict, "source": "auto"}
     return "broad", {**verdict, "source": "auto-broad"}
