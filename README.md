@@ -1,5 +1,7 @@
 # trend-radar-mcp
 
+[![ci](https://github.com/ngwddd/trend-radar-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/ngwddd/trend-radar-mcp/actions/workflows/ci.yml)
+
 把 [trend-radar](https://github.com/ngwddd/trend-radar) 那个 skill 的**确定性部分**拆出来，做成一个有状态、可并发、按需读取的 **MCP 工具**。
 
 原版 skill 保留不动，作为「判断协议 + 采集引擎」的历史版本；这个仓库是分支重写版。
@@ -86,7 +88,7 @@ radar_scan(query)
 ```bash
 git clone https://github.com/ngwddd/trend-radar-mcp.git
 cd trend-radar-mcp
-python -m unittest discover -s tests      # 23 tests, no network
+python -m unittest discover -s tests      # 25 tests, no network
 ```
 
 ### 接到 DeepSeek Harness

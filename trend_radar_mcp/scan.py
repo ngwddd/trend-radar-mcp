@@ -300,6 +300,7 @@ def _compact_entry(e: dict, summary_chars: int = 400) -> dict:
         "times_seen": e.get("times_seen"),
         "is_new": e.get("is_new"),
         "also_seen_in": e.get("also_seen_in") or [],
+        "topic_hits": e.get("topic_hits", 0),
     }
 
 

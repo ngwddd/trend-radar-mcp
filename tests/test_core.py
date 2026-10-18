@@ -75,6 +75,27 @@ class ScoringTest(unittest.TestCase):
                            truth_weight_social(vague))
 
 
+class DigestPickTest(unittest.TestCase):
+    def test_broad_digest_mixes_domains(self):
+        from trend_radar_mcp.tools import _digest_pick
+        entries = [
+            {"source_key": "jiemian", "topic_hits": 0},
+            {"source_key": "jiemian", "topic_hits": 0},
+            {"source_key": "qbitai", "topic_hits": 2},
+            {"source_key": "crossref-nature", "topic_hits": 1},
+        ]
+        picked = _digest_pick(entries, 3, "broad")
+        domains = {("ai" if e["source_key"] == "qbitai" else
+                    "science" if e["source_key"].startswith("crossref") else "social")
+                   for e in picked}
+        self.assertEqual(domains, {"social", "ai", "science"})
+
+    def test_narrow_digest_prefers_topic_hits(self):
+        from trend_radar_mcp.tools import _digest_pick
+        entries = [{"topic_hits": 0, "n": 1}, {"topic_hits": 2, "n": 2}]
+        self.assertEqual(_digest_pick(entries, 1, "ai")[0]["n"], 2)
+
+
 class DedupeTest(unittest.TestCase):
     def test_same_event_different_titles(self):
         a = title_tokens("Nature 发表新研究：某模型提升 12%")

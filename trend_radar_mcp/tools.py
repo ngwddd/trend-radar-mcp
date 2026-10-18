@@ -172,6 +172,45 @@ def _auto_scope(query: str, domain: str | None) -> tuple[str, dict]:
     return "broad", {**verdict, "source": "auto-broad"}
 
 
+DIGEST_DOMAINS = ("social", "ai", "science")
+
+
+def _entry_domain(e: dict) -> str:
+    key = e.get("source_key") or ""
+    if key == "external" or not key:
+        return "social"
+    doms = SOURCES.get(key, {}).get("domains") or []
+    for d in DIGEST_DOMAINS:
+        if d in doms:
+            return d
+    return "social"
+
+
+def _digest_pick(entries: list[dict], top: int, scope: str) -> list[dict]:
+    """Pick the head of one bucket.
+
+    broad: round-robin across social/AI/science so one high-truth general outlet
+    cannot occupy the whole digest (measured: AI queries were headed by French
+    protests). narrow: entries matching the scope lexicon first, then the rest.
+    """
+    if not entries:
+        return []
+    if scope == "broad":
+        buckets: dict[str, list] = {d: [] for d in DIGEST_DOMAINS}
+        for e in entries:
+            buckets.setdefault(_entry_domain(e), []).append(e)
+        out: list[dict] = []
+        while len(out) < top and any(buckets.values()):
+            for d in DIGEST_DOMAINS:
+                if buckets.get(d):
+                    out.append(buckets[d].pop(0))
+                if len(out) >= top:
+                    break
+        return out
+    preferred = [e for e in entries if (e.get("topic_hits") or 0) > 0]
+    rest = [e for e in entries if (e.get("topic_hits") or 0) <= 0]
+    return (preferred + rest)[:top]
+
 def _briefs_for(payload: dict, count: int, chars: int) -> dict[str, list]:
     """Inline summaries for the first `count` core items, then watch."""
     out = {"core": [], "watch": []}
@@ -204,10 +243,9 @@ def h_scan(args: dict) -> dict:
     )
     top = int(args.get("top", 4))
     digest: dict[str, list] = {b: [] for b in BUCKETS}
-    for e in payload["entries"]:
-        b = e.get("bucket") or "discarded"
-        if len(digest[b]) < top:
-            digest[b].append(_digest_item(e))
+    for b in BUCKETS:
+        bucket_entries = [e for e in payload["entries"] if (e.get("bucket") or "discarded") == b]
+        digest[b] = [_digest_item(e) for e in _digest_pick(bucket_entries, top, scope)]
     briefs = _briefs_for(payload, int(args.get("briefs", 3)),
                          int(args.get("brief_chars", 240)))
 
@@ -244,6 +282,8 @@ def h_scan(args: dict) -> dict:
             "skipped_empty_sources": skipped,
             "stream_fallback": payload.get("stream_fallback", False),
         },
+        "notice": ("core 为空：今天没有同时通过真值与传播闸门的条目；"
+                   "watch 是可信但尚未被独立转载的" if not digest["core"] else ""),
         "next": ("digest + briefs 已够写就直接写；不够再 radar_pack(ids≤12, fields=['summary'])；"
                  "写完用 radar_check 量关联度。"),
     }
