@@ -334,7 +334,10 @@ def _score_item(it: dict, domain: str) -> dict:
 
 def h_check(args: dict) -> dict:
     entries = args.get("entries")
-    if not entries and args.get("run_id"):
+    bucket = args.get("bucket") or "core"
+    available: dict = {}
+    run_request = ""
+    if entries is None and args.get("run_id"):
         store = Store()
         try:
             run = store.get_run(args["run_id"])
@@ -342,13 +345,28 @@ def h_check(args: dict) -> dict:
             store.close()
         if not run or "payload" not in run:
             raise ValueError(f"run not found: {args['run_id']}")
-        bucket = args.get("bucket") or "core"
-        entries = [e for e in (run["payload"].get("entries") or [])
-                   if e.get("bucket") == bucket]
-    if not entries:
+        all_entries = run["payload"].get("entries") or []
+        run_request = run["payload"].get("request") or ""
+        for e in all_entries:
+            available[e.get("bucket") or "discarded"] = available.get(e.get("bucket") or "discarded", 0) + 1
+        entries = [e for e in all_entries if e.get("bucket") == bucket]
+    if entries is None:
         raise ValueError("give entries or run_id")
 
-    kws = intent_keywords(args.get("query") or "", args.get("keywords"))
+    # An empty bucket is a finding, not an error: a run can legitimately have
+    # zero core items (structural for single-source peer-reviewed days).
+    if not entries:
+        return {
+            "bucket": bucket,
+            "empty": True,
+            "available_buckets": available,
+            "relevance": {"coverage": None, "threshold": 0.6,
+                          "needs_second_pass": False,
+                          "note": f"no entries in bucket {bucket!r}; "
+                                  "check watch/suspect or widen the window"},
+        }
+
+    kws = intent_keywords(args.get("query") or run_request, args.get("keywords"))
     eff = effective_keyword_count(kws)
     rel = keyword_coverage(kws, entries)
     rel.update({
