@@ -150,9 +150,9 @@ def _fetch_one(key: str, since: datetime, days: int, major_days: int,
     started = time.perf_counter()
     host = _host_of(spec)
     limiter.wait(host, STREAM_GAP.get(host, DEFAULT_GAP))
-    out = {"key": key, "entries": [], "status": "ok", "detail": None,
-           "seconds": 0.0, "archive_truncated": 0, "sub_failed": [],
-           "stale": None}
+    out = {"key": key, "kind": spec["kind"], "entries": [], "status": "ok",
+           "detail": None, "seconds": 0.0, "archive_truncated": 0,
+           "sub_failed": [], "stale": None}
     try:
         if spec["kind"] == "rss":
             got = F.fetch_rss(spec["url"], spec["label"], spec.get("ua"),
@@ -348,8 +348,13 @@ def _scan(domain, streams, days, major_days, max_per_source, request, keywords,
         for fut in as_completed(futures):
             results.append(fut.result())
     for r in results:
-        store.record_source(r["key"], ok=(r["status"] == "ok"),
-                            count=len(r["entries"]))
+        # Only FEEDS can be "empty" in the blacklist sense. A Crossref journal
+        # legitimately returns 0 for a short window; treating that as a dead
+        # feed removed every journal from the scan after three quiet days.
+        health_count = len(r["entries"])
+        if r.get("kind") == "crossref" and health_count == 0:
+            health_count = 1
+        store.record_source(r["key"], ok=(r["status"] == "ok"), count=health_count)
 
     report = []
     entries: list[dict] = []
