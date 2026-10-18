@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -41,6 +42,19 @@ from .scoring import (ARCHIVE_SCAN_LIMIT, ARCHIVE_SOURCES, PROMO_BODY_PENALTY,
 from .store import Store, home
 
 STREAM_GAP = {"export.arxiv.org": 3.0, "api.crossref.org": 0.35}
+# Cache policy. SOFT = still fresh; between SOFT and HARD the cached copy is
+# returned IMMEDIATELY and refreshed in the background; beyond HARD we fetch
+# synchronously. The point is that a user-facing scan almost never waits on
+# the network twice.
+SOFT_TTL = float(os.environ.get("TREND_RADAR_SOFT_TTL", 300))
+HARD_TTL = float(os.environ.get("TREND_RADAR_HARD_TTL", 3600))
+# A single misbehaving source must not dominate the wall clock. 10 s is above
+# the measured max of every source except arXiv (which is skipped by default).
+TIMEOUT_CAP = float(os.environ.get("TREND_RADAR_TIMEOUT_CAP", 10))
+
+_REFRESH_POOL = ThreadPoolExecutor(max_workers=4, thread_name_prefix="radar-refresh")
+_REFRESH_LOCK = threading.Lock()
+_REFRESHING: set[str] = set()
 DEFAULT_GAP = 0.05
 
 BUCKET_OF_SECTION = {
@@ -134,6 +148,27 @@ def _write_source_cache(out: dict, path: pathlib.Path) -> None:
         pass
 
 
+def _schedule_refresh(key: str, since: datetime, days: int, major_days: int,
+                      max_per_source: int) -> None:
+    """Refresh an expired-but-usable source off the request path (single-flight)."""
+    with _REFRESH_LOCK:
+        if key in _REFRESHING:
+            return
+        _REFRESHING.add(key)
+
+    def _run() -> None:
+        try:
+            _fetch_one(key, since, days, major_days, max_per_source,
+                       HostLimiter(), force=True)
+        except Exception:  # noqa: BLE001 - background refresh is best-effort
+            pass
+        finally:
+            with _REFRESH_LOCK:
+                _REFRESHING.discard(key)
+
+    _REFRESH_POOL.submit(_run)
+
+
 def _fetch_one(key: str, since: datetime, days: int, major_days: int,
                max_per_source: int, limiter: HostLimiter,
                force: bool = False) -> dict:
@@ -141,16 +176,29 @@ def _fetch_one(key: str, since: datetime, days: int, major_days: int,
     spec = SOURCES[key]
     cache_path = _source_cache_path(key, since, days, major_days, max_per_source)
     if not force:
+        age = None
         try:
-            if time.time() - cache_path.stat().st_mtime < 300:
+            age = time.time() - cache_path.stat().st_mtime
+        except OSError:
+            age = None
+        if age is not None and age <= HARD_TTL:
+            try:
                 cached = json.loads(cache_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                cached = None
+            if cached is not None:
+                stale = age > SOFT_TTL
+                if stale:
+                    _schedule_refresh(key, since, days, major_days, max_per_source)
                 trace.record("source.done", key=key, status=cached.get("status"),
                              count=len(cached.get("entries") or []), seconds=0.0,
-                             cached=True)
-                return {**cached, "seconds": 0.0, "cached": True}
-        except (OSError, ValueError):
-            pass
-    timeout = spec.get("timeout", F.TIMEOUT)
+                             cached=True, stale=stale, age=round(age, 1))
+                # NOTE: `stale` on a source result already means "stale feed"
+                # (a dict). The SWR flag must use its own key or it turns that
+                # dict into a bool and breaks the degraded-stream accounting.
+                return {**cached, "seconds": 0.0, "cached": True,
+                        "cache_stale": stale, "cache_age": round(age, 1)}
+    timeout = min(float(spec.get("timeout", F.TIMEOUT)), TIMEOUT_CAP)
     started = time.perf_counter()
     host = _host_of(spec)
     limiter.wait(host, STREAM_GAP.get(host, DEFAULT_GAP))
@@ -394,6 +442,7 @@ def _scan(domain, streams, days, major_days, max_per_source, request, keywords,
         report.append(row)
         entries.extend(r["entries"])
     report.sort(key=lambda x: keys.index(x["source"]))
+    stale_cache = sorted(r["key"] for r in results if r.get("cache_stale"))
     trace.record("scan.fetch", run_id=run_id, sources=len(report),
                  entries=len(entries),
                  failed=sum(1 for r in report
@@ -879,6 +928,7 @@ def _scan(domain, streams, days, major_days, max_per_source, request, keywords,
             "source_funnel": funnel,
             "degraded_streams": degraded,
             "stale_feeds": stale_feeds,
+            "stale_cache": stale_cache,
             "sub_feed_failures": sub_feed_failures,
             "archive_truncated": truncated,
         },
