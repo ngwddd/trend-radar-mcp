@@ -217,6 +217,36 @@ def _fetch_one(key: str, since: datetime, days: int, major_days: int,
     return out
 
 
+SCOPE_TERMS = {
+    # Deliberately narrow: 模型/算法/训练/推理/数据中心 are common in non-AI
+    # stories (military "训练区", a strike on a "数据中心") and produced false
+    # positives that outranked real AI news.
+    "ai": ("人工智能", "大模型", "智能体", "agent", "openai", "anthropic",
+           "英伟达", "nvidia", "gpu", "llm", "gpt", "机器学习", "深度学习",
+           "算力", "芯片", "机器人", "ai "),
+    "science": ("研究", "论文", "科学", "实验", "期刊", "nature", "science",
+                "细胞", "基因", "物理", "化学", "临床", "患者", "观测"),
+    "social": ("政策", "事故", "政府", "通报", "社会", "事件", "警方", "法院",
+               "居民", "城市", "国家", "发布", "回应", "遇袭", "火灾"),
+}
+
+
+def _topic_hits(entry: dict, scope: str) -> int:
+    """How many scope terms the title/summary actually contains.
+
+    A general outlet tagged with the `ai` domain still publishes protest news;
+    ranking by credibility alone put those at the top of an AI scan. Topic hits
+    are a RANKING signal only -- they never change the score or the bucket.
+    """
+    words = SCOPE_TERMS.get(scope)
+    if not words:
+        return 0
+    title = (entry.get("title") or "").lower()
+    summary = (entry.get("summary") or "").lower()
+    # A term in the headline is worth twice one buried in the body.
+    return 2 * sum(1 for w in words if w in title) + sum(1 for w in words if w in summary)
+
+
 def _compact_entry(e: dict, summary_chars: int = 400) -> dict:
     summary = e.get("summary") or ""
     if len(summary) > summary_chars:
@@ -636,7 +666,10 @@ def _scan(domain, streams, days, major_days, max_per_source, request, keywords,
         e["borderline"] = bool(
             abs(e["truth_score"] - CREDIBILITY_THRESHOLD) <= 0.05
             or abs(e["comm_score"] - CREDIBILITY_THRESHOLD) <= 0.05)
-    capped.sort(key=lambda e: (e["passes_gate"], e["truth_score"], e["comm_score"]),
+        e["topic_hits"] = _topic_hits(e, scope)
+    capped.sort(key=lambda e: (e["passes_gate"], e["topic_hits"],
+                               e["truth_score"], e["comm_score"],
+                               str(e.get("published") or "")),
                 reverse=True)
 
     # ---- per-source funnel (why did an item not land?) --------------------
@@ -682,9 +715,18 @@ def _scan(domain, streams, days, major_days, max_per_source, request, keywords,
         rows = [r for r in report if r["source"] in want]
         ok_rows = [r for r in rows if r["status"] == "ok"]
         got_n = sum(r.get("count", 0) for r in ok_rows)
+        skipped_here = [k for k in want if k in set(skipped_empty)]
+        stale_here = [k for k in want if any(s["source"] == k for s in stale_feeds)]
         if not ok_rows:
-            degraded.append({"stream": cls_name, "reason": "every source failed",
-                             "attempted": len(want), "succeeded": 0, "entries": 0})
+            if skipped_here or stale_here:
+                degraded.append({"stream": cls_name,
+                                 "reason": "no source delivered: skipped/stale only",
+                                 "attempted": len(want), "succeeded": 0, "entries": 0,
+                                 "skipped_empty": skipped_here,
+                                 "stale": stale_here})
+            else:
+                degraded.append({"stream": cls_name, "reason": "every source failed",
+                                 "attempted": len(want), "succeeded": 0, "entries": 0})
         elif got_n == 0:
             degraded.append({"stream": cls_name, "reason": "every source returned 0",
                              "attempted": len(want), "succeeded": len(ok_rows),
