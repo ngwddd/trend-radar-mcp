@@ -361,6 +361,11 @@ def _scan(domain, streams, days, major_days, max_per_source, request, keywords,
                                limiter, force_refresh): k for k in active}
         for fut in as_completed(futures):
             results.append(fut.result())
+    for key in skipped_empty:
+        report.append({"source": key, "label": SOURCES[key]["label"],
+                       "status": "skipped-empty", "count": 0, "seconds": 0.0,
+                       "detail": "skipped: 3 consecutive empty runs (12h)"})
+
     for r in results:
         # Only FEEDS can be "empty" in the blacklist sense. A Crossref journal
         # legitimately returns 0 for a short window; treating that as a dead
@@ -391,7 +396,8 @@ def _scan(domain, streams, days, major_days, max_per_source, request, keywords,
     report.sort(key=lambda x: keys.index(x["source"]))
     trace.record("scan.fetch", run_id=run_id, sources=len(report),
                  entries=len(entries),
-                 failed=sum(1 for r in report if r["status"] not in ("ok", "stale-feed")),
+                 failed=sum(1 for r in report
+                            if r["status"] not in ("ok", "stale-feed", "skipped-empty")),
                  cached=sum(1 for r in results if r.get("cached")))
 
     # ---- supplemental-search items are scored on the platform table --------
@@ -836,7 +842,8 @@ def _scan(domain, streams, days, major_days, max_per_source, request, keywords,
         "stream_fallback": stream_fallback,
         "skipped_slow": len(skipped_slow),
         "succeeded_sources": sum(1 for r in report if r["status"] == "ok"),
-        "failed_sources": sum(1 for r in report if r["status"] not in ("ok", "stale-feed")),
+        "failed_sources": sum(1 for r in report
+                              if r["status"] not in ("ok", "stale-feed", "skipped-empty")),
         "fetched": len(entries),
         "deduped": len(deduped),
         "emitted": len(capped),
