@@ -213,7 +213,9 @@ def h_scan(args: dict) -> dict:
 
     failed = [{"source": r["source"], "reason": (r.get("detail") or r["status"])[:60]}
               for r in payload["coverage"]["sources_report"]
-              if r["status"] not in ("ok", "stale-feed")]
+              if r["status"] not in ("ok", "stale-feed", "skipped-empty")]
+    skipped = [r["source"] for r in payload["coverage"]["sources_report"]
+               if r["status"] == "skipped-empty"]
     result = {
         "run_id": payload["run_id"],
         "scope": payload.get("scope"),
@@ -239,6 +241,7 @@ def h_scan(args: dict) -> dict:
             "degraded_streams": payload["coverage"]["degraded_streams"],
             "stale_feeds": payload["coverage"]["stale_feeds"],
             "failed_sources": failed[:8],
+            "skipped_empty_sources": skipped,
             "stream_fallback": payload.get("stream_fallback", False),
         },
         "next": ("digest + briefs 已够写就直接写；不够再 radar_pack(ids≤12, fields=['summary'])；"
