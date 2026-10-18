@@ -42,7 +42,7 @@
 
 ## 架构
 
-![pipeline](docs/pipeline.png)
+![pipeline](docs/pipeline-v0.2.png)
 
 ```
 radar_scan(domain, days, streams)
@@ -102,7 +102,7 @@ radar_scan(domain, days, streams)
 ```bash
 git clone https://github.com/ngwddd/trend-radar-mcp.git
 cd trend-radar-mcp
-python -m unittest discover -s tests      # 20 tests, no network
+python -m unittest discover -s tests      # 22 tests, no network
 ```
 
 ### 接到 DeepSeek Harness
