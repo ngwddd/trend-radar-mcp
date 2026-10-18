@@ -211,6 +211,42 @@ def _digest_pick(entries: list[dict], top: int, scope: str) -> list[dict]:
     rest = [e for e in entries if (e.get("topic_hits") or 0) <= 0]
     return (preferred + rest)[:top]
 
+_BUCKET_RANK = {"core": 0, "watch": 1, "suspect": 2, "calibration": 3, "discarded": 4}
+
+
+def _picks(entries: list[dict], top: int, scope: str) -> list[dict]:
+    """Cross-bucket head for the digest.
+
+    Buckets alone hide the shape of a day: broad runs put all high-truth items
+    in watch (social) while AI/science sit in discarded; a narrow AI run then
+    shows general news above real AI items. `picks` draws from every bucket and
+    keeps the bucket label on each item.
+    """
+    if not entries:
+        return []
+    ordered = sorted(
+        entries,
+        # topic relevance first: a discarded AI item beats a general-news
+        # watch item when the user asked about AI.
+        key=lambda e: (-(e.get("topic_hits") or 0),
+                       _BUCKET_RANK.get(e.get("bucket") or "discarded", 9),
+                       -(e.get("truth_score") or 0),
+                       -(e.get("comm_score") or 0)),
+    )
+    if scope == "broad":
+        by: dict[str, list] = {d: [] for d in DIGEST_DOMAINS}
+        for e in ordered:
+            by.setdefault(_entry_domain(e), []).append(e)
+        out: list[dict] = []
+        while len(out) < top and any(by.values()):
+            for d in DIGEST_DOMAINS:
+                if by.get(d):
+                    out.append(by[d].pop(0))
+                if len(out) >= top:
+                    break
+        return out
+    return ordered[:top]
+
 def _briefs_for(payload: dict, count: int, chars: int) -> dict[str, list]:
     """Inline summaries for the first `count` core items, then watch."""
     out = {"core": [], "watch": []}
@@ -246,6 +282,7 @@ def h_scan(args: dict) -> dict:
     for b in BUCKETS:
         bucket_entries = [e for e in payload["entries"] if (e.get("bucket") or "discarded") == b]
         digest[b] = [_digest_item(e) for e in _digest_pick(bucket_entries, top, scope)]
+    picks = [_digest_item(e) for e in _picks(payload["entries"], top, scope)]
     briefs = _briefs_for(payload, int(args.get("briefs", 3)),
                          int(args.get("brief_chars", 240)))
 
@@ -272,6 +309,7 @@ def h_scan(args: dict) -> dict:
             "wall_s": payload["stats"]["wall_seconds"],
             "buckets": payload["stats"]["buckets"],
         },
+        "picks": picks,
         "digest": digest,
         "briefs": briefs,
         "relevance": payload["relevance"],
@@ -292,12 +330,17 @@ def h_scan(args: dict) -> dict:
 
 def _fit(result: dict, limit: int = 8000) -> dict:
     text = json.dumps(result, ensure_ascii=False)
-    for bucket in ("discarded", "calibration", "suspect", "watch"):
+    # Trim the per-bucket digest first: `picks` is the cross-bucket head and is
+    # the part a reader actually starts from.
+    for bucket in ("discarded", "calibration", "suspect", "watch", "core"):
         if len(text.encode()) <= limit:
             break
         if result["digest"].get(bucket):
             result["digest"][bucket].pop()
             text = json.dumps(result, ensure_ascii=False)
+    while len(text.encode()) > limit and len(result.get("picks") or []) > 2:
+        result["picks"].pop()
+        text = json.dumps(result, ensure_ascii=False)
     while len(text.encode()) > limit and result["briefs"].get("watch"):
         result["briefs"]["watch"].pop()
         text = json.dumps(result, ensure_ascii=False)
