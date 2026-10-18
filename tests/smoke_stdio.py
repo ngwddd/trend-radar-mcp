@@ -31,16 +31,18 @@ print("tools:", [t["name"] for t in tools])
 res = call({"jsonrpc": "2.0", "id": 3, "method": "resources/list"})["result"]["resources"]
 print("resources:", len(res), res[0]["uri"])
 r = call({"jsonrpc": "2.0", "id": 4, "method": "tools/call",
-          "params": {"name": "radar_sources", "arguments": {"domain": "science"}}})
+          "params": {"name": "radar_check", "arguments": {
+              "entries": [{"title": "AI 安全与对齐"}], "keywords": ["安全", "对齐"]}}})
 out = json.loads(r["result"]["content"][0]["text"])
-print("sources science:", len(out["sources"]), "counts", out["counts"])
+print("relevance:", out["relevance"]["coverage"])
 r = call({"jsonrpc": "2.0", "id": 5, "method": "tools/call",
-          "params": {"name": "radar_score", "arguments": {
-              "domain": "social",
-              "items": [{"title": "某地发生事故，3 人受伤", "source": "澎湃新闻",
-                         "url": "http://x", "date": "2026-10-18",
-                         "summary": "12 月 3 日，某市发生事故，3 人受伤，2 辆车受损。"}]}}})
-print("score:", r["result"]["content"][0]["text"][:300].replace("\n", " "))
+          "params": {"name": "radar_check", "arguments": {
+              "entries": [{"title": "某地发生事故，3 人受伤"}],
+              "keywords": ["事故"],
+              "external": [{"title": "某地发生事故，3 人受伤", "source": "澎湃新闻",
+                            "url": "http://x", "date": "2026-10-18",
+                            "summary": "12 月 3 日，某市发生事故，3 人受伤，2 辆车受损。"}]}}})
+print("scored:", r["result"]["content"][0]["text"][:240].replace("\n", " "))
 proc.stdin.close()
 proc.terminate()
 err = proc.stderr.read()

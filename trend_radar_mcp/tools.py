@@ -1,14 +1,14 @@
-"""MCP tool surface: digest first, details on demand.
+"""MCP tool surface v0.3: three tools, one round trip when possible.
 
-v0.1 returned full compact entries from `radar_scan` (~10 KB) and made the
-model read them before it knew which ones mattered. v0.2 returns a *digest*:
-id, bucket, two scores, title, source, date, one flag. Summaries are fetched
-only for the ids the model actually chooses.
+v0.2 was already cheap per byte, but it still cost the model 4 turns:
+classify -> scan -> entries -> write. v0.3 removes two of them:
 
-Token rules enforced here, not left to the model:
-  scan response  <= 6 KB   (digest + problems)
-  entries call   <= 4 KB   (default fields, <= 12 items, 300-char summaries)
-  score call     <= 20 items
+  * scope is classified INSIDE `radar_scan` (explicit domain still wins);
+  * the top core/watch items come back WITH their summaries (`briefs`), so a
+    normal briefing needs one call, not two.
+
+The remaining tools are `radar_pack` (more detail for chosen ids) and
+`radar_check` (relevance + scoring of supplemental search results).
 """
 
 from __future__ import annotations
@@ -18,18 +18,17 @@ import json
 from . import fetch as F
 from .relevance import (classify_request, effective_keyword_count,
                         intent_keywords, keyword_coverage)
-from .registry import BLOCKED, DOMAINS, SOURCES
-from .scan import BUCKET_OF_SECTION, scan
-from .scoring import (CREDIBILITY_THRESHOLD, comm_weight_social,
-                      external_truth_weight, is_customer_story, platform_of,
-                      signal_words, truth_weight_social)
+from .registry import DOMAINS, SOURCES
+from .scan import scan
+from .scoring import (CREDIBILITY_THRESHOLD, comm_weight, external_truth_weight,
+                      is_customer_story, platform_of, signal_words,
+                      truth_weight_social)
 from .store import Store
 
 BUCKETS = ("core", "watch", "suspect", "calibration", "discarded")
-FLAGS = {"single": "单源硬证据", "retracted": "已撤稿", "customer": "厂商客户案例"}
 
 
-def _digest_item(e: dict) -> dict:
+def _digest_item(e: dict, summary_chars: int = 0) -> dict:
     flag = ""
     if e.get("record_alert") == "retracted":
         flag = "retracted"
@@ -37,7 +36,7 @@ def _digest_item(e: dict) -> dict:
         flag = "single"
     elif e.get("customer_story"):
         flag = "customer"
-    return {
+    item = {
         "id": e.get("event_id"),
         "bucket": e.get("bucket"),
         "truth": e.get("truth_score"),
@@ -48,132 +47,100 @@ def _digest_item(e: dict) -> dict:
         "new": bool(e.get("is_new")),
         "flag": flag,
     }
+    if e.get("borderline"):
+        item["borderline"] = True
+    if summary_chars:
+        s = e.get("summary") or ""
+        item["summary"] = s[:summary_chars] + ("…" if len(s) > summary_chars else "")
+    return item
 
 
 TOOLS = [
     {
         "name": "radar_scan",
         "description": (
-            "扫描结构化情报源（42 个：期刊/官方/媒体/社区/热榜），并发采集 + 固定权重评分 + 分桶。"
-            "返回 run_id 和 digest（每桶 top N 的 id/标题/两个分数），不返回摘要正文。"
-            "\n\n何时用 broad：需求无法判进 social/science/ai 三类，或用户明确要「全面搜」。"
-            "broad = 全部 42 源、三路全开，比单类慢约 1 倍、贵约 1 倍，不要默认用。"
-            "\n\n硬约束：truth/comm 是引擎算的，0.6 为闸门，禁止自己估分或合成一个分；"
-            "is_new 来自本地状态库（first_seen），比模型印象可靠；"
-            "digest 里 calibration 桶只做传播度校准，永不作内容源。"
+            "采集 + 评分 + 分桶，一次调用给出可写简报的材料。"
+            "\n\nscope 自动判定：不给 domain 时按 query 判三类；判不进（或跨类）→ broad 全量 42 源。"
+            "显式 domain 永远优先。返回 scope_source 说明是 auto / explicit / auto-broad。"
+            "\n\n返回 digest（每桶 top N：id/标题/truth·comm/来源/日期/new），"
+            "并对 core、watch 的前 `briefs` 条**内联摘要**（默认 3 条 × 240 字）。"
+            "多数情况下一次调用就够写；要更多正文再用 radar_pack。"
+            "\n\n硬约束：truth/comm 由引擎算，0.6 是闸门，禁止自己估；"
+            "borderline=true 表示分数在 0.55–0.65，必须复核后再引用；"
+            "calibration 桶只校准传播度，永不作内容源。"
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
-                "domain": {"type": "string", "enum": ["social", "science", "ai", "broad"],
-                           "description": "省略 = broad。判不准时用 broad，不要猜一个类。"},
+                "query": {"type": "string",
+                          "description": "用户原话。用于自动判 scope 与关联度，不要改写。"},
+                "domain": {"type": "string",
+                           "enum": ["auto", "social", "science", "ai", "broad"],
+                           "default": "auto",
+                           "description": "auto=按 query 判；判不进自动 broad。显式给则覆盖。"},
                 "streams": {"type": "array", "items": {"type": "string",
                                                        "enum": ["social", "authority", "trend"]},
-                            "description": "默认三路全开。只要一路时显式给，省一半时间。"},
+                            "description": "默认三路。只查一路时给，省时间。"},
                 "days": {"type": "integer", "minimum": 1, "maximum": 30, "default": 3},
                 "major_days": {"type": "integer", "minimum": 0, "maximum": 14, "default": 0,
-                               "description": "重大事件宽窗（只对期刊/官方源生效）。进来的条目 in_window=false，引用必须写明日期不在基础窗口内。"},
-                "max_per_source": {"type": "integer", "minimum": 5, "maximum": 100, "default": 20,
-                                   "description": "单源上限。默认 20：实测 30 只多 9 秒、多 20% 噪声，对结论没有增益。"},
-                "request": {"type": "string", "description": "用户原话，用于关联度判定。"},
-                "keywords": {"type": "array", "items": {"type": "string"}, "maxItems": 8,
-                             "description": "意图关键词 3–8 个；中文整句会被拆成从句，不要给整句。"},
-                "external": {"type": "array", "items": {"type": "object"}, "maxItems": 20,
-                             "description": "web_search 补来的条目（title/url/source/date/summary），按平台表打分后并入同一闸门。"},
-                "force_refresh": {"type": "boolean", "default": False,
-                                  "description": "默认源级缓存 5 分钟；true 强制重抓（慢 10 倍，非必要不要用）。"},
-                "top": {"type": "integer", "minimum": 1, "maximum": 10, "default": 3,
-                        "description": "每桶返回多少条 digest。core 可给 6–8，其余 2–3。"},
+                               "description": "重大事件宽窗。进来的条目 in_window=false，引用必须写明日期不在基础窗口。"},
+                "max_per_source": {"type": "integer", "minimum": 5, "maximum": 100, "default": 20},
+                "keywords": {"type": "array", "items": {"type": "string"}, "maxItems": 8},
+                "external": {"type": "array", "items": {"type": "object"}, "maxItems": 10,
+                             "description": "web_search 补搜条目（title/url/source/date/summary）。"},
+                "briefs": {"type": "integer", "minimum": 0, "maximum": 8, "default": 3,
+                           "description": "内联多少条摘要（core 优先，再 watch）。0=只要 digest。"},
+                "brief_chars": {"type": "integer", "minimum": 120, "maximum": 400, "default": 240},
+                "deep": {"type": "boolean", "default": False,
+                         "description": "true 才抓 arXiv API（4 分类 × 3s 礼貌间隔，最慢的源）。默认跳过，用它的 RSS 代替。"},
+                "force_refresh": {"type": "boolean", "default": False},
+                "top": {"type": "integer", "minimum": 1, "maximum": 10, "default": 4},
             },
+            "required": ["query"],
         },
     },
     {
-        "name": "radar_entries",
+        "name": "radar_pack",
         "description": (
-            "按 id / bucket / stream 取条目正文，是读取摘要的唯一入口。"
-            "先用 digest 选 id，再只对这些 id 取 summary —— 不要整桶拉。"
-            "\n\n硬约束：一次最多 20 个 id / 50 条；默认字段只含 title/url/source/date + 分数，"
-            "要 summary 必须显式写 fields=['summary']；摘要默认截到 300 字。"
+            "按 id / bucket 取正文与细节。只在 digest 不够写的时候用。"
+            "\n硬约束：ids ≤ 12；limit ≤ 20；默认只给 scores+flags，"
+            "要正文必须显式 fields=['summary']；摘要默认 240 字。"
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "run_id": {"type": "string"},
-                "ids": {"type": "array", "items": {"type": "string"}, "maxItems": 20,
-                        "description": "digest 里的 id（支持前缀匹配）。优先级高于 bucket。"},
+                "ids": {"type": "array", "items": {"type": "string"}, "maxItems": 12,
+                        "description": "digest 里的 id（支持前缀）。给了 ids 就忽略 bucket。"},
                 "bucket": {"type": "string", "enum": list(BUCKETS)},
-                "stream": {"type": "string", "enum": ["social", "authority", "trend"]},
                 "fields": {"type": "array", "items": {"type": "string",
                                                       "enum": ["summary", "scores", "flags"]},
-                           "description": "默认 ['scores','flags']；要正文加 'summary'；不要一次全开。"},
-                "limit": {"type": "integer", "minimum": 1, "maximum": 50, "default": 12},
+                           "default": ["scores", "flags"]},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 20, "default": 8},
                 "offset": {"type": "integer", "minimum": 0, "default": 0},
-                "summary_chars": {"type": "integer", "minimum": 120, "maximum": 800, "default": 300},
+                "summary_chars": {"type": "integer", "minimum": 120, "maximum": 600, "default": 240},
             },
             "required": ["run_id"],
         },
     },
     {
-        "name": "radar_sources",
+        "name": "radar_check",
         "description": (
-            "源注册表：42 源的 class/domain、13 条已知死路（不要再试）、"
-            "以及本地状态库里的连续空源（这些会被自动跳过 12 小时）。"
+            "发布前自检：关联度（方向性覆盖）+ 补搜条目打分，一次调用。"
+            "\n硬约束：量的是准备发布的条目（bucket=core 或显式 entries），不要传全池；"
+            "关键词 ≤ 8；补搜条目 ≤ 10 且必须带 url；<0.6 必须重查后再写。"
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
-                "domain": {"type": "string", "enum": ["social", "science", "ai"]},
-                "verbose": {"type": "boolean", "default": False},
-            },
-        },
-    },
-    {
-        "name": "radar_score",
-        "description": (
-            "给 web_search / web_fetch 找到的条目按同一套权重打分并分桶，不重跑采集。"
-            "用在「主池没有、但检索到了」的补充材料上，最多 20 条。"
-            "\n硬约束：必须带 url；没有 url 的条目不要传（无法核查等于噪声）。"
-        ),
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "items": {"type": "array", "minItems": 1, "maxItems": 20,
-                          "items": {"type": "object"}},
-                "domain": {"type": "string", "enum": ["social", "science", "ai"],
-                           "default": "social"},
-            },
-            "required": ["items"],
-        },
-    },
-    {
-        "name": "radar_relevance",
-        "description": (
-            "阶段 5 关联度：量「准备发布的条目」是否还在回答原问题（方向性覆盖，不是相似度）。"
-            "<0.6 触发二次搜寻。优先传 run_id + bucket=core（量萃取结果），不要传全池 —— 全池会让闸门失效。"
-        ),
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "request": {"type": "string"},
-                "keywords": {"type": "array", "items": {"type": "string"}, "maxItems": 8},
-                "entries": {"type": "array", "items": {"type": "object"}, "maxItems": 50},
                 "run_id": {"type": "string"},
                 "bucket": {"type": "string", "enum": list(BUCKETS), "default": "core"},
-            },
-        },
-    },
-    {
-        "name": "radar_history",
-        "description": (
-            "本地状态库：某事件第一次见到的时间、被见过几次、最近一次是哪天。"
-            "用来回答「这是真新，还是旧闻重发」；也是 broad 与单类扫描共用的去重底账。"
-        ),
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "event_id": {"type": "string"},
-                "query": {"type": "string", "description": "标题片段"},
-                "limit": {"type": "integer", "minimum": 1, "maximum": 50, "default": 20},
+                "entries": {"type": "array", "items": {"type": "object"}, "maxItems": 30},
+                "query": {"type": "string"},
+                "keywords": {"type": "array", "items": {"type": "string"}, "maxItems": 8},
+                "external": {"type": "array", "items": {"type": "object"}, "maxItems": 10},
+                "domain": {"type": "string", "enum": ["social", "science", "ai", "broad"],
+                           "default": "broad"},
             },
         },
     },
@@ -184,70 +151,102 @@ TOOLS = [
 # handlers
 # ---------------------------------------------------------------------------
 
-def _buckets_from(payload: dict, top: int) -> dict:
-    out: dict[str, list] = {b: [] for b in BUCKETS}
-    for e in payload.get("entries") or []:
-        b = e.get("bucket") or "discarded"
-        if len(out[b]) < top:
-            out[b].append(_digest_item(e))
+def _auto_scope(query: str, domain: str | None) -> tuple[str, dict]:
+    if domain and domain not in ("auto", ""):
+        return ("broad" if domain == "broad" else domain), {"source": "explicit"}
+    verdict = classify_request(query or "", None)
+    matched = verdict.get("matched") or {}
+    if verdict["verdict"] == "classifier" and len(matched) == 1 and verdict["confidence"] >= 0.7:
+        return next(iter(matched)), {**verdict, "source": "auto"}
+    return "broad", {**verdict, "source": "auto-broad"}
+
+
+def _briefs_for(payload: dict, count: int, chars: int) -> dict[str, list]:
+    """Inline summaries for the first `count` core items, then watch."""
+    out = {"core": [], "watch": []}
+    left = count
+    for bucket in ("core", "watch"):
+        for e in payload["entries"]:
+            if left <= 0:
+                break
+            if e.get("bucket") != bucket:
+                continue
+            out[bucket].append(_digest_item(e, summary_chars=chars))
+            left -= 1
     return out
 
 
 def h_scan(args: dict) -> dict:
-    domain = args.get("domain") or "broad"
-    top = int(args.get("top", 3))
+    query = args.get("query") or ""
+    scope, classification = _auto_scope(query, args.get("domain"))
     payload = scan(
-        domain=None if domain == "broad" else domain,
+        domain=None if scope == "broad" else scope,
         streams=args.get("streams"),
         days=int(args.get("days", 3)),
         major_days=int(args.get("major_days", 0)),
         max_per_source=int(args.get("max_per_source", 20)),
-        request=args.get("request") or "",
+        request=query,
         keywords=args.get("keywords") or [],
         external=args.get("external") or [],
         force_refresh=bool(args.get("force_refresh")),
+        deep=bool(args.get("deep")),
     )
-    failed = [{"source": r["source"], "reason": (r.get("detail") or r["status"])[:70]}
+    top = int(args.get("top", 4))
+    digest: dict[str, list] = {b: [] for b in BUCKETS}
+    for e in payload["entries"]:
+        b = e.get("bucket") or "discarded"
+        if len(digest[b]) < top:
+            digest[b].append(_digest_item(e))
+    briefs = _briefs_for(payload, int(args.get("briefs", 3)),
+                         int(args.get("brief_chars", 240)))
+
+    failed = [{"source": r["source"], "reason": (r.get("detail") or r["status"])[:60]}
               for r in payload["coverage"]["sources_report"]
               if r["status"] not in ("ok", "stale-feed")]
     result = {
         "run_id": payload["run_id"],
         "scope": payload.get("scope"),
+        "scope_source": classification.get("source"),
+        "classification": {"verdict": classification.get("verdict"),
+                           "matched": list((classification.get("matched") or {}).keys()),
+                           "confidence": classification.get("confidence")},
         "window": payload["window"],
         "stats": {
             "sources": payload["stats"]["requested_sources"],
             "ok": payload["stats"]["succeeded_sources"],
             "failed": payload["stats"]["failed_sources"],
             "skipped_empty": payload["stats"].get("skipped_empty_sources", 0),
+            "skipped_slow": payload["stats"].get("skipped_slow", 0),
             "emitted": payload["stats"]["emitted"],
             "wall_s": payload["stats"]["wall_seconds"],
             "buckets": payload["stats"]["buckets"],
-            "gates": payload["stats"]["gates"],
         },
-        "digest": _buckets_from(payload, top),
+        "digest": digest,
+        "briefs": briefs,
         "relevance": payload["relevance"],
         "coverage": {
             "degraded_streams": payload["coverage"]["degraded_streams"],
             "stale_feeds": payload["coverage"]["stale_feeds"],
-            "failed_sources": failed[:10],
+            "failed_sources": failed[:8],
             "stream_fallback": payload.get("stream_fallback", False),
         },
-        "next": ("radar_entries(run_id, ids=[...], fields=['summary']) 只取你要写的条目；"
-                 "core 可引用、watch 不是噪声、calibration 只作传播校准。"),
+        "next": ("digest + briefs 已够写就直接写；不够再 radar_pack(ids≤12, fields=['summary'])；"
+                 "写完用 radar_check 量关联度。"),
     }
     return _fit(result)
 
 
-def _fit(result: dict, limit: int = 6500) -> dict:
-    """Keep the scan response inside its budget by trimming the tail buckets."""
+def _fit(result: dict, limit: int = 8000) -> dict:
     text = json.dumps(result, ensure_ascii=False)
     for bucket in ("discarded", "calibration", "suspect", "watch"):
         if len(text.encode()) <= limit:
             break
-        items = result["digest"].get(bucket) or []
-        if items:
-            items.pop()
+        if result["digest"].get(bucket):
+            result["digest"][bucket].pop()
             text = json.dumps(result, ensure_ascii=False)
+    while len(text.encode()) > limit and result["briefs"].get("watch"):
+        result["briefs"]["watch"].pop()
+        text = json.dumps(result, ensure_ascii=False)
     return result
 
 
@@ -257,12 +256,13 @@ def _project(e: dict, fields: set[str], chars: int) -> dict:
            "source": e.get("source"), "date": e.get("published")}
     if "summary" in fields:
         s = e.get("summary") or ""
-        out["summary"] = s[:chars] if len(s) > chars else s
+        out["summary"] = s[:chars] + ("…" if len(s) > chars else "")
     if "scores" in fields:
         out.update({"truth": e.get("truth_score"), "comm": e.get("comm_score"),
                     "section": e.get("section"), "gate": e.get("gate_note"),
                     "evidence_type": e.get("evidence_type"),
-                    "pickups": e.get("pickups")})
+                    "pickups": e.get("pickups"),
+                    "borderline": bool(e.get("borderline"))})
     if "flags" in fields:
         out.update({"new": bool(e.get("is_new")), "first_seen": e.get("first_seen"),
                     "times_seen": e.get("times_seen"),
@@ -276,7 +276,7 @@ def _project(e: dict, fields: set[str], chars: int) -> dict:
     return out
 
 
-def h_entries(args: dict) -> dict:
+def h_pack(args: dict) -> dict:
     store = Store()
     try:
         run = store.get_run(args["run_id"])
@@ -287,53 +287,20 @@ def h_entries(args: dict) -> dict:
     entries = run["payload"].get("entries") or []
     ids = [x.strip() for x in (args.get("ids") or []) if x and x.strip()]
     if ids:
-        entries = [e for e in entries if any((e.get("event_id") or "").startswith(i) for i in ids)]
-    else:
-        bucket = args.get("bucket")
-        stream = args.get("stream")
-        if bucket:
-            entries = [e for e in entries if e.get("bucket") == bucket]
-        if stream:
-            entries = [e for e in entries
-                       if SOURCES.get(e.get("source_key") or "", {}).get("class") == stream
-                       or (stream == "social" and e.get("source_key") == "external")]
+        entries = [e for e in entries
+                   if any((e.get("event_id") or "").startswith(i) for i in ids)]
+    elif args.get("bucket"):
+        entries = [e for e in entries if e.get("bucket") == args["bucket"]]
     total = len(entries)
     offset = int(args.get("offset", 0))
-    limit = min(int(args.get("limit", 12)), 50)
+    limit = min(int(args.get("limit", 8)), 20)
     fields = set(args.get("fields") or ["scores", "flags"])
     page = entries[offset:offset + limit]
     return {
         "run_id": args["run_id"],
         "total": total,
         "returned": len(page),
-        "entries": [_project(e, fields, int(args.get("summary_chars", 300))) for e in page],
-    }
-
-
-def h_sources(args: dict) -> dict:
-    domain = args.get("domain")
-    rows = []
-    for key, spec in SOURCES.items():
-        if domain and domain not in spec.get("domains", []):
-            continue
-        row = {"key": key, "label": spec["label"], "class": spec.get("class"),
-               "group": spec.get("group"), "domains": spec.get("domains", [])}
-        if args.get("verbose"):
-            row["note"] = spec.get("note")
-            row["kind"] = spec.get("kind")
-        rows.append(row)
-    store = Store()
-    try:
-        health = store.health()
-    finally:
-        store.close()
-    return {
-        "domains": DOMAINS,
-        "counts": {k: sum(1 for r in rows if r["class"] == k)
-                   for k in ("authority", "social", "trend")},
-        "sources": rows,
-        "blocked": [{"url": u, "reason": why} for u, why in BLOCKED] if args.get("verbose") else len(BLOCKED),
-        "empty_streak": [h for h in health if h.get("empty_streak", 0) >= 3],
+        "entries": [_project(e, fields, int(args.get("summary_chars", 240))) for e in page],
     }
 
 
@@ -352,41 +319,20 @@ def _score_item(it: dict, domain: str) -> dict:
     entry["platform_key"] = platform_of(entry["source_key"], entry["source_label"])
     if domain == "social":
         entry["truth_score"] = truth_weight_social(entry)
-        entry["reconciliation"] = "social-evidence-form"
     else:
         entry["truth_score"] = external_truth_weight(entry)
-        entry["reconciliation"] = "platform-table(external)"
     pickups = len({x for x in entry["also_seen_in"]} | {entry["source_label"]})
-    if isinstance(it.get("pickups"), int) and it["pickups"] > 0:
-        pickups = max(pickups, it["pickups"])
-    entry["comm_score"] = comm_weight_social(entry, pickups, False)
+    entry["comm_score"] = comm_weight(pickups, False)
     entry["pickups"] = pickups
     entry["customer_story"] = is_customer_story(entry)
     t_ok = entry["truth_score"] >= CREDIBILITY_THRESHOLD
     c_ok = entry["comm_score"] >= CREDIBILITY_THRESHOLD
-    entry["passes_truth"] = t_ok
-    entry["passes_comm"] = c_ok
     entry["section"] = ("核心区" if t_ok and c_ok else
-                        "待观察区" if t_ok else
-                        "存疑区" if c_ok else "丢弃")
+                        "待观察区" if t_ok else "存疑区" if c_ok else "丢弃")
     return entry
 
 
-def h_score(args: dict) -> dict:
-    domain = args.get("domain") or "social"
-    scored = [_score_item(it, domain) for it in args["items"]
-              if isinstance(it, dict) and (it.get("title") or "").strip()
-              and (it.get("url") or "").strip()]
-    order = {"核心区": 0, "待观察区": 1, "存疑区": 2, "丢弃": 3}
-    scored.sort(key=lambda e: (order[e["section"]], -e["truth_score"], -e["comm_score"]))
-    return {"domain": domain, "threshold": CREDIBILITY_THRESHOLD,
-            "scored": [{"title": e["title"][:80], "url": e["url"],
-                        "truth": e["truth_score"], "comm": e["comm_score"],
-                        "pickups": e["pickups"], "section": e["section"]}
-                       for e in scored]}
-
-
-def h_relevance(args: dict) -> dict:
+def h_check(args: dict) -> dict:
     entries = args.get("entries")
     if not entries and args.get("run_id"):
         store = Store()
@@ -396,45 +342,39 @@ def h_relevance(args: dict) -> dict:
             store.close()
         if not run or "payload" not in run:
             raise ValueError(f"run not found: {args['run_id']}")
-        entries = run["payload"].get("entries") or []
         bucket = args.get("bucket") or "core"
-        entries = [e for e in entries if e.get("bucket") == bucket]
+        entries = [e for e in (run["payload"].get("entries") or [])
+                   if e.get("bucket") == bucket]
     if not entries:
         raise ValueError("give entries or run_id")
-    kws = intent_keywords(args.get("request") or "", args.get("keywords"))
+
+    kws = intent_keywords(args.get("query") or "", args.get("keywords"))
     eff = effective_keyword_count(kws)
-    verdict = classify_request(args.get("request") or "", None)
     rel = keyword_coverage(kws, entries)
     rel.update({
-        "request_type": verdict["verdict"],
-        "classification": verdict,
-        "effective_keywords": eff,
         "threshold": 0.6,
+        "effective_keywords": eff,
         "needs_second_pass": bool(rel.get("coverage") is not None
                                   and rel["coverage"] < 0.6 and eff >= 2),
         "weak_validation": eff < 2,
     })
     if eff < 2:
         rel["weak_reason"] = f"only {eff} effective keyword(s); coverage recorded, not gated"
-    return rel
 
-
-def h_history(args: dict) -> dict:
-    store = Store()
-    try:
-        rows = store.history(event_id=args.get("event_id"), query=args.get("query"),
-                             limit=int(args.get("limit", 20)))
-        stats = store.stats()
-    finally:
-        store.close()
-    return {"db": stats, "items": rows}
+    out = {"relevance": rel}
+    external = args.get("external") or []
+    if external:
+        scored = [_score_item(it, args.get("domain") or "broad") for it in external
+                  if isinstance(it, dict) and (it.get("title") or "").strip()
+                  and (it.get("url") or "").strip()]
+        out["scored"] = [{"title": e["title"][:70], "url": e["url"],
+                          "truth": e["truth_score"], "comm": e["comm_score"],
+                          "section": e["section"]} for e in scored]
+    return out
 
 
 HANDLERS = {
     "radar_scan": h_scan,
-    "radar_entries": h_entries,
-    "radar_sources": h_sources,
-    "radar_score": h_score,
-    "radar_relevance": h_relevance,
-    "radar_history": h_history,
+    "radar_pack": h_pack,
+    "radar_check": h_check,
 }

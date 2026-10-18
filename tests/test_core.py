@@ -52,6 +52,16 @@ class ScoringTest(unittest.TestCase):
     def test_second_independent_source_clears_comm(self):
         self.assertGreaterEqual(comm_weight(2, False), 0.6)
 
+    def test_comm_weights_quality_not_just_count(self):
+        from trend_radar_mcp.scoring import comm_weight_eff
+        self.assertEqual(comm_weight_eff([]), 0.30)          # single source
+        self.assertGreaterEqual(comm_weight_eff([0.60]), 0.60)  # average pickup passes
+        self.assertLess(comm_weight_eff([0.45]), 0.60)       # one low-tier reprint does NOT
+        self.assertGreater(comm_weight_eff([0.90]),
+                           comm_weight_eff([0.45]))           # top-tier pickup counts more
+        self.assertGreater(comm_weight_eff([0.6, 0.6]),
+                           comm_weight_eff([0.6]))
+
     def test_trend_board_is_capped_below_truth_gate(self):
         entry = {"title": "热搜第一", "source_key": "toutiao-hot", "is_trend": True}
         self.assertLess(truth_weight_social(entry), 0.6)

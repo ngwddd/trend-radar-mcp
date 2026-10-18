@@ -27,10 +27,12 @@ from .dedupe import event_id, is_same_event, title_tokens
 from .relevance import (classify_request, effective_keyword_count,
                         intent_keywords, keyword_coverage)
 from .registry import (CREDIBILITY_THRESHOLD, DOMAINS, ERRATA_DROP, ERRATA_RE,
-                       HARD_EVIDENCE_TYPES, SOURCES, evidence_type_for, identity_of)
+                       HARD_EVIDENCE_TYPES, PLATFORM_WEIGHT, SOURCES, SOURCE_WEIGHT,
+                       evidence_type_for, identity_of)
+from .scoring import platform_of
 from .scoring import (ARCHIVE_SCAN_LIMIT, ARCHIVE_SOURCES, PROMO_BODY_PENALTY,
                       PROMO_PENALTY, apply_trend_cap, body_missing, comm_weight,
-                      comm_weight_social, domain_of_source, domain_share,
+                      comm_weight_eff, comm_weight_social, domain_of_source, domain_share,
                       estimate_pickups, external_truth_weight,
                       is_customer_story, notice_severity, platform_of,
                       promo_position, signal_words, trend_saturation,
@@ -256,7 +258,8 @@ def scan(domain: str | None = None, streams: list[str] | None = None, days: int 
          major_days: int = 0, max_per_source: int = 30,
          request: str = "", keywords: list[str] | None = None,
          external: list[dict] | None = None, force_refresh: bool = False,
-         max_workers: int = 16, store: Store | None = None) -> dict:
+         max_workers: int = 16, deep: bool = False,
+         store: Store | None = None) -> dict:
     """Run one scan.
 
     `domain` omitted or "broad" scans the whole registry -- that is the
@@ -271,19 +274,26 @@ def scan(domain: str | None = None, streams: list[str] | None = None, days: int 
     try:
         return _scan(domain, streams, int(days), int(major_days), int(max_per_source),
                      request or "", list(keywords or []), list(external or []),
-                     bool(force_refresh), int(max_workers), store)
+                     bool(force_refresh), int(max_workers), bool(deep), store)
     finally:
         if own_store:
             store.close()
 
 
 def _scan(domain, streams, days, major_days, max_per_source, request, keywords,
-          external, force_refresh, max_workers, store) -> dict:
+          external, force_refresh, max_workers, deep, store) -> dict:
     started = time.perf_counter()
     now = datetime.now().astimezone()
     since = now - timedelta(days=days)
     scope = "broad" if domain in (None, "", "broad") else domain
     keys = resolve_keys(domain, streams)
+    # deep=False drops the arXiv API (4 categories x 3 s courtesy gap). It is
+    # the single slowest source and almost always stale on a 3-day window;
+    # its RSS sibling still covers the daily announcement list.
+    skipped_slow = []
+    if not deep:
+        skipped_slow = [k for k in keys if SOURCES[k].get("kind") == "atom"]
+        keys = [k for k in keys if k not in set(skipped_slow)]
     requested_streams = set(streams or [])
     stream_fallback = bool(requested_streams) and not any(
         SOURCES[k].get("class") in requested_streams for k in keys
@@ -473,23 +483,45 @@ def _scan(domain, streams, days, major_days, max_per_source, request, keywords,
         others.discard(entry["source_identity"])
         corroborated = bool(others) and cls != "trend"
 
+        # Quality-weighted corroboration (v0.3): a reprint in a low-tier
+        # outlet must not count the same as a pickup by Reuters/Nature.
+        def _tier_of(name: str) -> float:
+            if social_branch:
+                return PLATFORM_WEIGHT.get(platform_of("", name), 0.40)
+            w = SOURCE_WEIGHT.get(name)
+            if w:
+                return w
+            if name in SOURCES:
+                return SOURCE_WEIGHT.get(name, 0.50)
+            return PLATFORM_WEIGHT.get(platform_of("", name), 0.40)
+
+        tier_own = _tier_of(key) if not entry.get("external") else \
+            PLATFORM_WEIGHT.get(platform_of("", entry.get("source_label") or ""), 0.40)
+        tier_others = [_tier_of(x) for x in others]
+        if isinstance(entry.get("_external_pickups"), int) and entry["_external_pickups"] > len(tier_others) + 1:
+            tier_others += [0.75] * (entry["_external_pickups"] - len(tier_others) - 1)
+
         if entry.get("external"):
             entry["reconciliation"] = "platform-table(external)"
             entry["truth_score"] = external_truth_weight(entry)
-            entry["comm_score"] = comm_weight_social(entry, pickups,
-                                                     bool(entry.get("is_trend")))
+            entry["comm_score"] = comm_weight_eff(tier_others,
+                                                  bool(entry.get("is_trend")))
             entry["score_source"] = "platform_table"
         elif bool(domain_of_source(key) & run_domains) and social_branch:
             entry["reconciliation"] = "social-evidence-form"
-            entry["truth_score"] = truth_weight_social(entry, corroborated=corroborated)
-            entry["comm_score"] = comm_weight_social(entry, pickups,
-                                                     bool(entry.get("is_trend")))
+            entry["truth_score"] = truth_weight_social(entry, corroborated=False)
+            entry["comm_score"] = comm_weight_eff(tier_others,
+                                                  bool(entry.get("is_trend")))
         else:
             entry["reconciliation"] = "source-tier"
-            entry["truth_score"] = truth_weight(key, cls, corroborated=corroborated,
+            # Corroboration is a PROPAGATION signal, not a truth signal:
+            # counting it in both places let two low-tier reprints lift a
+            # weak claim over the truth gate. It now affects comm only.
+            entry["truth_score"] = truth_weight(key, cls, corroborated=False,
                                                 notices=entry.get("update_notices"),
                                                 entry=entry)
-            entry["comm_score"] = comm_weight(pickups, bool(entry.get("is_trend")))
+            entry["comm_score"] = comm_weight_eff(tier_others,
+                                                  bool(entry.get("is_trend")))
         apply_trend_cap(entry)
 
         promo = promo_position(entry)
@@ -597,6 +629,10 @@ def _scan(domain, streams, days, major_days, max_per_source, request, keywords,
             entry["gate_note"] = "both gates failed"
             counters["failed"] += 1
 
+    for e in capped:
+        e["borderline"] = bool(
+            abs(e["truth_score"] - CREDIBILITY_THRESHOLD) <= 0.05
+            or abs(e["comm_score"] - CREDIBILITY_THRESHOLD) <= 0.05)
     capped.sort(key=lambda e: (e["passes_gate"], e["truth_score"], e["comm_score"]),
                 reverse=True)
 
@@ -715,6 +751,7 @@ def _scan(domain, streams, days, major_days, max_per_source, request, keywords,
         "requested_sources": len(keys),
         "skipped_empty_sources": len(skipped_empty),
         "stream_fallback": stream_fallback,
+        "skipped_slow": len(skipped_slow),
         "succeeded_sources": sum(1 for r in report if r["status"] == "ok"),
         "failed_sources": sum(1 for r in report if r["status"] not in ("ok", "stale-feed")),
         "fetched": len(entries),
@@ -739,6 +776,7 @@ def _scan(domain, streams, days, major_days, max_per_source, request, keywords,
         "scope": scope,
         "skipped_empty": skipped_empty,
         "stream_fallback": stream_fallback,
+        "skipped_slow": len(skipped_slow),
         "streams": streams or ["social", "authority", "trend"],
         "window": {"days": days, "major_days": major_days,
                    "since": since.date().isoformat(),

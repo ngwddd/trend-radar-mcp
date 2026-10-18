@@ -56,7 +56,7 @@ class ScanTest(unittest.TestCase):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def test_buckets_and_state(self):
-        payload = S.scan("ai", streams=["authority", "trend"], days=3, request="AI")
+        payload = S.scan("ai", streams=["authority", "trend"], days=3, request="AI", deep=True)
         buckets = {}
         for e in payload["entries"]:
             buckets.setdefault(e["bucket"], []).append(e)
@@ -79,7 +79,7 @@ class ScanTest(unittest.TestCase):
         self.assertTrue(all(e["is_new"] for e in payload["entries"]))
 
         # second run sees the same events and keeps first_seen stable
-        again = S.scan("ai", streams=["authority", "trend"], days=3, request="AI")
+        again = S.scan("ai", streams=["authority", "trend"], days=3, request="AI", deep=True)
         by_id = {e["event_id"]: e for e in payload["entries"]}
         changed = [e for e in again["entries"]
                    if e["event_id"] in by_id
@@ -96,7 +96,8 @@ class ScanTest(unittest.TestCase):
     def test_broad_scope_uses_the_whole_registry(self):
         payload = S.scan(None, days=3, request="今天有什么")
         self.assertEqual(payload["scope"], "broad")
-        self.assertEqual(payload["stats"]["requested_sources"], 42)
+        self.assertEqual(payload["stats"]["requested_sources"], 41)
+        self.assertEqual(payload["stats"].get("skipped_slow"), 1)
         self.assertEqual(payload["relevance"]["mode"], "broad")
 
     def test_stream_with_no_source_falls_back(self):

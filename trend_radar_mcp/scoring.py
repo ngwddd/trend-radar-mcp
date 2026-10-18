@@ -456,6 +456,38 @@ def comm_weight(n_independent_sources: int, in_trend: bool) -> float:
     return round(min(base, 0.95), 3)
 
 
+def comm_weight_eff(tiers: list[float], in_trend: bool = False) -> float:
+    """Propagation score from INDEPENDENT SOURCE MASS, not from a raw count.
+
+    v1/v0.2 used a step function on the number of outlets: 1 -> 0.30,
+    2 -> 0.60. That is the "too idealised" part -- two IT之家 reprints counted
+    exactly like Reuters + Nature. Here each independent outlet contributes its
+    own credibility weight (0.75 = "good outlet" = 1 unit), and the curve is
+    linearly interpolated between the old calibrated points.
+
+    Measured intent preserved:
+      * one average outlet            -> ~0.30 (below gate, exclusive)
+      * two average outlets           -> 0.60  (just passes)
+      * two top-tier outlets          -> ~0.66
+      * two low-tier outlets (0.45)   -> ~0.43 (does NOT pass)
+      * three average outlets         -> 0.72
+    """
+    pts = [(1.0, 0.30), (2.0, 0.60), (3.0, 0.72), (4.0, 0.80), (5.0, 0.88)]
+    if in_trend:
+        pts = [(1.0, 0.35), (2.0, 0.60), (3.0, 0.72), (4.0, 0.80), (5.0, 0.88)]
+    # `tiers` are the OTHER independent outlets only. The origin is always
+    # one unit; each pickup adds tier/0.60 units (0.60 = "average outlet").
+    # A single source therefore stays at 0.30 no matter how prestigious it is:
+    # prestige is a truth signal, spread is not.
+    mass = 1.0 + sum(max(0.0, t) for t in tiers) / 0.60 if tiers else 1.0
+    if mass <= pts[0][0]:
+        return pts[0][1]
+    for (x0, y0), (x1, y1) in zip(pts, pts[1:]):
+        if mass <= x1:
+            return round(y0 + (y1 - y0) * (mass - x0) / (x1 - x0), 3)
+    return pts[-1][1]
+
+
 def estimate_pickups(entry: dict, cls: str = "") -> int:
     """Distinct source IDENTITIES carrying this entry (mirrors do not count twice).
 

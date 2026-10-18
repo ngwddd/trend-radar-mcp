@@ -22,20 +22,20 @@ SERVER_NAME = "trend-radar"
 PROTOCOL_VERSION = "2024-11-05"
 
 INSTRUCTIONS = """\
-trend-radar: 三路情报采集与研判（digest 优先，正文按需取）。
+trend-radar v0.3：三工具，一次调用拿到可写材料。
 
-1. 先判 scope：social / science / ai 三选一；**判不了就用 broad**（42 源全开），不要猜。
-   broad 比单类慢约 1 倍、贵约 1 倍，只在真的跨类或用户要「全面搜」时用。
-2. radar_scan 返回的是 digest：id、标题、truth/comm、来源、日期、new、flag。
-   它**不含摘要正文**。要写哪几条，再用 radar_entries(ids=[...], fields=['summary'])
-   只取那几条 —— 不要整桶拉、不要先拉全量再筛。
-3. truth / comm 是引擎按固定权重算的，0.6 是闸门；不要自己估分，也不要把两个分合成一个。
-4. 分桶：core=双项达标或单源硬证据；watch=可信但没传开（不是噪声）；
-   suspect=传得广但不可信；calibration=热榜，只校准传播度，永不作内容源。
-5. relevance.needs_second_pass=true 时不许直接下结论：换角度/关键词重查，再复核权重。
+1. 直接调 radar_scan(query="用户原话")。scope 自动判定：三类之一，判不进就 broad（42 源全开）。
+   显式 domain 永远优先；返回 scope_source=auto / explicit / auto-broad 可审计。
+2. radar_scan 已经内联 core/watch 的前 3 条摘要（briefs）。够写就直接写；
+   不够再用 radar_pack(ids≤12, fields=["summary"]) 补 —— 不要整桶拉。
+3. truth / comm 是引擎按固定权重算的；0.6 是闸门，borderline=true 的条目必须复核。
+4. 分桶：core=可引用；watch=可信但没传开（不是噪声）；suspect=传得广但不可信；
+   calibration=热榜，只校准传播度，永不作内容源。
+5. 补搜条目走 radar_check(external=[...]) 打分；发布前用 radar_check(bucket="core") 量关联度，
+   <0.6 必须换角度重查，不许直接下结论。
 6. 写简报：每条带 URL 与日期；预印本不写已发表；厂商自述不算独立验证；
-   「本次覆盖」如实写失败/降级的源与 skipped_empty 的源。
-7. 预算：radar_scan ≈5 KB、radar_entries ≈3 KB。摘要默认 300 字，够用就别加大。
+   覆盖披露必须含失败源、降级流、跳过的空源。
+7. 预算：radar_scan ≈6–8 KB，radar_pack ≈3 KB。默认值够用就不要加参数。
 """
 
 
@@ -62,7 +62,9 @@ def _registry_doc() -> dict:
 def _resource_list() -> list[dict]:
     out = [
         {"uri": "radar://registry", "name": "source registry",
-         "description": "42 个源、三路分类、权重归属与已知死路", "mimeType": "application/json"},
+         "description": "42 个源、三路分类、13 条已知死路", "mimeType": "application/json"},
+        {"uri": "radar://history", "name": "state & source health",
+         "description": "状态库统计 + 连续空源黑名单", "mimeType": "application/json"},
         {"uri": "radar://runs", "name": "recent runs",
          "description": "最近的扫描记录（run_id / 时间 / 统计）", "mimeType": "application/json"},
     ]
@@ -85,6 +87,14 @@ def _read_resource(uri: str) -> dict:
     if uri == "radar://registry":
         return {"contents": [{"uri": uri, "mimeType": "application/json",
                               "text": json.dumps(_registry_doc(), ensure_ascii=False)}]}
+    if uri == "radar://history":
+        store = Store()
+        try:
+            body = {"stats": store.stats(), "source_health": store.health()}
+        finally:
+            store.close()
+        return {"contents": [{"uri": uri, "mimeType": "application/json",
+                              "text": json.dumps(body, ensure_ascii=False)}]}
     if uri == "radar://runs":
         store = Store()
         try:

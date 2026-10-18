@@ -29,8 +29,7 @@ class ServerTest(unittest.TestCase):
         resp = server.handle({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
         tools = resp["result"]["tools"]
         names = {t["name"] for t in tools}
-        self.assertEqual(names, {"radar_scan", "radar_entries", "radar_sources",
-                                 "radar_score", "radar_relevance", "radar_history"})
+        self.assertEqual(names, {"radar_scan", "radar_pack", "radar_check"})
         for t in tools:
             self.assertEqual(t["inputSchema"]["type"], "object")
 
@@ -46,15 +45,16 @@ class ServerTest(unittest.TestCase):
 
     def test_tool_call_is_json_text(self):
         resp = server.handle({"jsonrpc": "2.0", "id": 5, "method": "tools/call",
-                              "params": {"name": "radar_sources",
-                                         "arguments": {"domain": "ai"}}})
+                              "params": {"name": "radar_check",
+                                         "arguments": {"entries": [{"title": "AI 安全与对齐"}],
+                                                       "keywords": ["安全", "对齐"]}}})
         self.assertFalse(resp["result"]["isError"])
         body = json.loads(resp["result"]["content"][0]["text"])
-        self.assertTrue(body["sources"])
+        self.assertIn("relevance", body)
 
     def test_bad_tool_returns_iserror_not_crash(self):
         resp = server.handle({"jsonrpc": "2.0", "id": 6, "method": "tools/call",
-                              "params": {"name": "radar_entries",
+                              "params": {"name": "radar_pack",
                                          "arguments": {"run_id": "missing"}}})
         self.assertTrue(resp["result"]["isError"])
 
