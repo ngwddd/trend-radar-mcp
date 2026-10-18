@@ -26,6 +26,8 @@
 
 ## 架构
 
+![pipeline](docs/pipeline.png)
+
 ```
 radar_scan(domain, days, streams)
         │
