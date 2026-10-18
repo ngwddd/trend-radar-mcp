@@ -361,11 +361,6 @@ def _scan(domain, streams, days, major_days, max_per_source, request, keywords,
                                limiter, force_refresh): k for k in active}
         for fut in as_completed(futures):
             results.append(fut.result())
-    for key in skipped_empty:
-        report.append({"source": key, "label": SOURCES[key]["label"],
-                       "status": "skipped-empty", "count": 0, "seconds": 0.0,
-                       "detail": "skipped: 3 consecutive empty runs (12h)"})
-
     for r in results:
         # Only FEEDS can be "empty" in the blacklist sense. A Crossref journal
         # legitimately returns 0 for a short window; treating that as a dead
@@ -378,6 +373,11 @@ def _scan(domain, streams, days, major_days, max_per_source, request, keywords,
     report = []
     entries: list[dict] = []
     stale_feeds, sub_feed_failures, truncated, degraded = [], {}, {}, []
+    for key in skipped_empty:
+        report.append({"source": key, "label": SOURCES[key]["label"],
+                       "status": "skipped-empty", "count": 0, "seconds": 0.0,
+                       "detail": "skipped: 3 consecutive empty runs (12h)"})
+
     for r in results:
         row = {"source": r["key"], "label": SOURCES[r["key"]]["label"],
                "status": r["status"], "count": len(r["entries"]),
