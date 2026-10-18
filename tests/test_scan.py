@@ -93,6 +93,18 @@ class ScanTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             S.scan("nope", days=3)
 
+    def test_broad_scope_uses_the_whole_registry(self):
+        payload = S.scan(None, days=3, request="今天有什么")
+        self.assertEqual(payload["scope"], "broad")
+        self.assertEqual(payload["stats"]["requested_sources"], 42)
+        self.assertEqual(payload["relevance"]["mode"], "broad")
+
+    def test_stream_with_no_source_falls_back(self):
+        # social has no authority tier at all; an empty run would be a bug.
+        payload = S.scan("social", streams=["authority"], days=3)
+        self.assertGreater(payload["stats"]["requested_sources"], 0)
+        self.assertTrue(payload["stream_fallback"])
+
 
 if __name__ == "__main__":
     unittest.main()

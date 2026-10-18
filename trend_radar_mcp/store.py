@@ -36,6 +36,14 @@ CREATE TABLE IF NOT EXISTS runs (
     path       TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_runs_created ON runs(created_at);
+
+CREATE TABLE IF NOT EXISTS source_health (
+    key          TEXT PRIMARY KEY,
+    last_try     TEXT,
+    last_ok      TEXT,
+    empty_streak INTEGER NOT NULL DEFAULT 0,
+    last_count   INTEGER NOT NULL DEFAULT 0
+);
 """
 
 
@@ -163,6 +171,51 @@ class Store:
                 d["stats"] = {}
             out.append(d)
         return out
+
+    # -- source health -------------------------------------------------
+    def should_skip(self, key: str, hours: int = 12) -> bool:
+        """Skip a source that returned 0 items on its last 3 tries.
+
+        A dead/empty feed is not free: it still costs a request and a timeout
+        slot. The streak resets on the first non-empty answer, so a feed that
+        comes back is picked up again on the next run.
+        """
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT empty_streak,last_try FROM source_health WHERE key=?",
+                (key,)).fetchone()
+        if row is None or int(row["empty_streak"]) < 3:
+            return False
+        try:
+            last = datetime.fromisoformat(row["last_try"])
+        except (TypeError, ValueError):
+            return False
+        return (datetime.now(timezone.utc) - last) < timedelta(hours=hours)
+
+    def record_source(self, key: str, ok: bool, count: int) -> None:
+        now = _now()
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT empty_streak FROM source_health WHERE key=?", (key,)).fetchone()
+            streak = int(row["empty_streak"]) if row else 0
+            if ok and count > 0:
+                streak = 0
+            elif ok and count == 0:
+                streak += 1
+            self._conn.execute(
+                "INSERT INTO source_health(key,last_try,last_ok,empty_streak,last_count)"
+                " VALUES(?,?,?,?,?) ON CONFLICT(key) DO UPDATE SET"
+                " last_try=excluded.last_try, last_ok=excluded.last_ok,"
+                " empty_streak=excluded.empty_streak, last_count=excluded.last_count",
+                (key, now, now if (ok and count > 0) else None, streak, count))
+            self._conn.commit()
+
+    def health(self) -> list[dict]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM source_health ORDER BY empty_streak DESC, last_try DESC"
+            ).fetchall()
+        return [dict(r) for r in rows]
 
     def stats(self) -> dict:
         with self._lock:

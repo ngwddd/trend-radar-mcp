@@ -85,23 +85,34 @@ def _host_of(spec: dict) -> str:
         return ""
 
 
-def resolve_keys(domain: str, streams: list[str] | None) -> list[str]:
-    """Pick the sources for one domain and the requested streams.
+def resolve_keys(domain: str | None, streams: list[str] | None) -> list[str]:
+    """Pick the sources for a scope and the requested streams.
 
-    Trend boards are added to every full-pipeline run (they are the third,
-    independent signal), but never to a single-stream request.
+    `domain=None` / "broad" means the WHOLE registry: the fallback when the
+    request cannot be classified into one of the three classes.
+    A stream that has no source inside this scope falls back to all streams
+    instead of producing an empty run (measured: social + authority = 0).
     """
-    if domain not in DOMAINS:
-        raise ValueError(f"unknown domain {domain!r}; valid: {list(DOMAINS)}")
-    keys = [k for k, v in SOURCES.items() if domain in v.get("domains", [])]
-    if streams:
-        wanted = set(streams)
-        keys = [k for k in keys if SOURCES[k].get("class") in wanted]
-        if "trend" in wanted:
-            keys += [k for k, v in SOURCES.items() if v.get("class") == "trend"]
+    if domain in (None, "", "broad"):
+        keys = list(SOURCES)
     else:
-        keys += [k for k, v in SOURCES.items() if v.get("class") == "trend"]
-    return list(dict.fromkeys(keys))
+        if domain not in DOMAINS:
+            raise ValueError(f"unknown domain {domain!r}; valid: {list(DOMAINS)} + broad")
+        keys = [k for k, v in SOURCES.items() if domain in v.get("domains", [])]
+
+    wanted = set(streams or [])
+    if wanted:
+        selected = [k for k in keys if SOURCES[k].get("class") in wanted]
+        if selected:
+            keys = selected
+        # no source of that stream in this scope -> keep the scope's streams
+    if not wanted or "trend" in wanted:
+        keys = keys + [k for k, v in SOURCES.items() if v.get("class") == "trend"]
+
+    keys = [k for k in dict.fromkeys(keys) if SOURCES[k].get("status", "OK") == "OK"]
+    if not keys:
+        raise ValueError(f"no source matches domain={domain!r} streams={streams!r}")
+    return keys
 
 
 def _source_cache_path(key: str, since: datetime, days: int, major_days: int,
@@ -241,14 +252,20 @@ def _compact_entry(e: dict, summary_chars: int = 400) -> dict:
     }
 
 
-def scan(domain: str, streams: list[str] | None = None, days: int = 3,
+def scan(domain: str | None = None, streams: list[str] | None = None, days: int = 3,
          major_days: int = 0, max_per_source: int = 30,
          request: str = "", keywords: list[str] | None = None,
          external: list[dict] | None = None, force_refresh: bool = False,
-         max_workers: int = 12, store: Store | None = None) -> dict:
-    """Run one scan and return a compact summary plus the run file path."""
+         max_workers: int = 16, store: Store | None = None) -> dict:
+    """Run one scan.
+
+    `domain` omitted or "broad" scans the whole registry -- that is the
+    fallback when the request cannot be classified into social/science/ai.
+    """
     if not (1 <= int(days) <= 30):
         raise ValueError("days must be between 1 and 30")
+    if domain not in (None, "", "broad") and domain not in DOMAINS:
+        raise ValueError(f"unknown domain {domain!r}; valid: {list(DOMAINS)} + broad")
     own_store = store is None
     store = store or Store()
     try:
@@ -265,17 +282,31 @@ def _scan(domain, streams, days, major_days, max_per_source, request, keywords,
     started = time.perf_counter()
     now = datetime.now().astimezone()
     since = now - timedelta(days=days)
+    scope = "broad" if domain in (None, "", "broad") else domain
     keys = resolve_keys(domain, streams)
-    run_id = store.start_run(domain, request)
+    requested_streams = set(streams or [])
+    stream_fallback = bool(requested_streams) and not any(
+        SOURCES[k].get("class") in requested_streams for k in keys
+        if SOURCES[k].get("class") != "trend")
+    run_id = store.start_run(scope, request)
     F.set_cache_ttl(0 if force_refresh else 300.0)
+
+    # Adaptive skip: a feed that returned 0 on its last 3 tries is not free --
+    # it still costs a request and a timeout slot. It comes back automatically
+    # the first time it answers again.
+    skipped_empty = [k for k in keys if store.should_skip(k)]
+    active = [k for k in keys if k not in set(skipped_empty)]
 
     limiter = HostLimiter()
     results: list[dict] = []
-    with ThreadPoolExecutor(max_workers=max(1, min(max_workers, len(keys)))) as pool:
+    with ThreadPoolExecutor(max_workers=max(1, min(max_workers, len(active)))) as pool:
         futures = {pool.submit(_fetch_one, k, since, days, major_days, max_per_source,
-                               limiter, force_refresh): k for k in keys}
+                               limiter, force_refresh): k for k in active}
         for fut in as_completed(futures):
             results.append(fut.result())
+    for r in results:
+        store.record_source(r["key"], ok=(r["status"] == "ok"),
+                            count=len(r["entries"]))
 
     report = []
     entries: list[dict] = []
@@ -416,13 +447,18 @@ def _scan(domain, streams, days, major_days, max_per_source, request, keywords,
         first = h.get("first_seen")
         entry["first_seen"] = first
         entry["times_seen"] = h.get("times_seen", 0)
-        entry["is_new"] = bool(
-            h.get("times_seen", 0) == 0
-            or (first and first[:10] >= since.date().isoformat()))
+        first_date = None
+        if first:
+            try:
+                first_date = datetime.fromisoformat(first).astimezone().date()
+            except ValueError:
+                first_date = None
+        entry["is_new"] = bool(h.get("times_seen", 0) == 0
+                               or (first_date and first_date >= since.date()))
 
     # ---- credibility weights ---------------------------------------------
-    run_domains = {domain}
-    social_branch = domain == "social"
+    run_domains = set(DOMAINS) if scope == "broad" else {scope}
+    social_branch = scope == "social"
     for entry in deduped:
         key = entry.get("source_key", "")
         cls = SOURCES.get(key, {}).get("class", "")
@@ -616,11 +652,20 @@ def _scan(domain, streams, days, major_days, max_per_source, request, keywords,
                              "entries": 0})
 
     # ---- relevance --------------------------------------------------------
-    verdict = classify_request(request, [domain])
+    verdict = classify_request(request, [scope] if scope != "broad" else None)
     classifier = verdict["verdict"] == "classifier"
-    kws = intent_keywords(request, keywords)
+    kws = intent_keywords(request, keywords or [])
     eff_kw = effective_keyword_count(kws)
-    if not kws and not (request or "").strip():
+    if scope == "broad":
+        if kws and eff_kw >= 2:
+            rel = keyword_coverage(kws, capped)
+            rel["mode"] = "broad(keyword)"
+            rel["needs_second_pass"] = rel["coverage"] < 0.6
+        else:
+            rel = {"mode": "broad", "coverage": None, "needs_second_pass": False,
+                   "note": "broad scan (no class); relevance falls back to keyword "
+                           "coverage when keywords are supplied"}
+    elif not kws and not (request or "").strip():
         rel = {"mode": "none", "coverage": None,
                "note": "no request/keywords supplied; relevance not measured"}
     elif classifier and not kws:
@@ -666,7 +711,10 @@ def _scan(domain, streams, days, major_days, max_per_source, request, keywords,
 
     counts = {k: len(v) for k, v in buckets.items()}
     stats = {
+        "scope": scope,
         "requested_sources": len(keys),
+        "skipped_empty_sources": len(skipped_empty),
+        "stream_fallback": stream_fallback,
         "succeeded_sources": sum(1 for r in report if r["status"] == "ok"),
         "failed_sources": sum(1 for r in report if r["status"] not in ("ok", "stale-feed")),
         "fetched": len(entries),
@@ -687,7 +735,10 @@ def _scan(domain, streams, days, major_days, max_per_source, request, keywords,
     payload = {
         "run_id": run_id,
         "generated_at": now.isoformat(timespec="seconds"),
-        "domain": domain,
+        "domain": scope,
+        "scope": scope,
+        "skipped_empty": skipped_empty,
+        "stream_fallback": stream_fallback,
         "streams": streams or ["social", "authority", "trend"],
         "window": {"days": days, "major_days": major_days,
                    "since": since.date().isoformat(),

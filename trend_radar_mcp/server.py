@@ -22,19 +22,20 @@ SERVER_NAME = "trend-radar"
 PROTOCOL_VERSION = "2024-11-05"
 
 INSTRUCTIONS = """\
-trend-radar: 三路情报采集与研判。
+trend-radar: 三路情报采集与研判（digest 优先，正文按需取）。
 
-用法契约（这几条是硬约束，工具不会替你违反）：
-1. 先判三大类（social / science / ai）。判不准就问用户，不要猜 —— 分类错了，
-   下游没有任何环节能发现。
-2. radar_scan 返回的 truth_score / comm_score 是引擎按权重表算的，0.6 是闸门；
-   不要自己估分，也不要把两个分合成一个。is_new 来自本地状态库，用它判断「新」。
-3. 分桶语义：core=双项达标或单源硬证据；watch=可信但还没传开（不是噪声）；
-   suspect=传得广但不可信；calibration=热榜，只做传播度校准，永不作内容源。
-4. needs_second_pass=true 时不许直接下结论：换角度/关键词重查，再复核权重。
-5. 写简报时：每条必须有 URL 与日期；预印本不许写成已发表；厂商自述不算独立验证；
-   「本次覆盖」必须如实写失败/降级的源 —— 用户需要知道你没看到什么。
-6. 补充检索来的条目先过 radar_score，再与主池同权比较。
+1. 先判 scope：social / science / ai 三选一；**判不了就用 broad**（42 源全开），不要猜。
+   broad 比单类慢约 1 倍、贵约 1 倍，只在真的跨类或用户要「全面搜」时用。
+2. radar_scan 返回的是 digest：id、标题、truth/comm、来源、日期、new、flag。
+   它**不含摘要正文**。要写哪几条，再用 radar_entries(ids=[...], fields=['summary'])
+   只取那几条 —— 不要整桶拉、不要先拉全量再筛。
+3. truth / comm 是引擎按固定权重算的，0.6 是闸门；不要自己估分，也不要把两个分合成一个。
+4. 分桶：core=双项达标或单源硬证据；watch=可信但没传开（不是噪声）；
+   suspect=传得广但不可信；calibration=热榜，只校准传播度，永不作内容源。
+5. relevance.needs_second_pass=true 时不许直接下结论：换角度/关键词重查，再复核权重。
+6. 写简报：每条带 URL 与日期；预印本不写已发表；厂商自述不算独立验证；
+   「本次覆盖」如实写失败/降级的源与 skipped_empty 的源。
+7. 预算：radar_scan ≈5 KB、radar_entries ≈3 KB。摘要默认 300 字，够用就别加大。
 """
 
 

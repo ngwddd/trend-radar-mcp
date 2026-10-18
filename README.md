@@ -24,6 +24,22 @@
 
 ---
 
+
+## v0.2（2026-10-19）· 效率与纯度
+
+- **判不了类别 → `broad`**：整张注册表 42 源全开，不再逼模型在三类里猜一个。
+  `domain` 可省略；返回里 `scope="broad"`。
+- **digest 优先**：`radar_scan` 只回 id / 标题 / truth·comm / 来源 / 日期（~5 KB），
+  **不含摘要正文**。要写哪几条，用 `radar_entries(ids=[...], fields=["summary"])`
+  只取那几条（~3 KB）。
+- **自适应跳源**：连续 3 次返回 0 条的源，12 小时内跳过；它一恢复就自动回到列表。
+- **硬限制写进 schema**：ids ≤ 20、entries ≤ 50、score ≤ 20 条、keywords ≤ 8、
+  摘要默认 300 字、`radar_scan` 响应 ≤ 6.5 KB。
+- **修 bug**：`social + authority` 没有权威源时会整轮空跑 → 现在回退到该域全部流，
+  并在返回里标 `stream_fallback=true`；不再把「空跑」伪装成「今天没有内容」。
+- 实测：broad 冷启 **10.7 s** / 热 **0.3 s**；scan 响应 **5.2 KB**
+  （v0.1 为 11 KB，原版 compact JSON 为 158 KB）。
+
 ## 架构
 
 ![pipeline](docs/pipeline.png)
