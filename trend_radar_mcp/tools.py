@@ -116,7 +116,7 @@ TOOLS = [
     {
         "name": "radar_sources",
         "description": (
-            "源注册表：42 源的 class/domain、46 条已知死路（不要再试）、"
+            "源注册表：42 源的 class/domain、13 条已知死路（不要再试）、"
             "以及本地状态库里的连续空源（这些会被自动跳过 12 小时）。"
         ),
         "inputSchema": {
