@@ -479,18 +479,28 @@ def _scan(domain, streams, days, major_days, max_per_source, request, keywords,
             dropped_window += 1
 
     # ---- de-duplicate by EVENT, not by exact title ------------------------
+    # Non-trend entries first: when the same story appears on a feed and on a
+    # hot board, the feed entry must be the survivor (the board is calibration
+    # only). Stable sort, so fetch order is otherwise preserved.
+    kept.sort(key=lambda e: SOURCES.get(e.get("source_key", ""), {}).get("class") == "trend")
+
     seen: list[dict] = []
+    by_id: dict[str, dict] = {}
     merged = 0
     for entry in kept:
         toks = title_tokens(entry.get("title") or "")
         if not toks:
             continue
         entry["event_id"] = event_id(entry.get("title") or "")
-        hit = None
-        for cand in seen:
-            if is_same_event(toks, cand["_tokens"]):
-                hit = cand
-                break
+        # Exact-id fast path: single-token titles ("RepRapMicron") can never
+        # satisfy the Jaccard/intersection rule, so identical headlines from
+        # two feeds used to survive as two entries with the SAME event_id.
+        hit = by_id.get(entry["event_id"])
+        if hit is None:
+            for cand in seen:
+                if is_same_event(toks, cand["_tokens"]):
+                    hit = cand
+                    break
         if hit is not None:
             hit.setdefault("also_seen_in", []).append(
                 entry.get("source_key") or entry.get("source_label"))
@@ -502,6 +512,7 @@ def _scan(domain, streams, days, major_days, max_per_source, request, keywords,
             entry.setdefault("also_titles", [])
             entry["_tokens"] = toks
             seen.append(entry)
+            by_id[entry["event_id"]] = entry
     deduped = seen
     trace.record("scan.dedupe", run_id=run_id, kept=len(kept),
                  deduped=len(deduped), merged=merged)
