@@ -22,7 +22,8 @@
 | 边界样本 | 0.59 / 0.61 处置相反 | **borderline 带**（0.55–0.65）标出来 |
 | arXiv API | 每轮都抓（18 s 量级） | **默认跳过**，`deep=true` 才抓 |
 
-实测：单类 2–9 s、broad 冷启 ~13 s、热 0.2 s；扫描响应 5.9–7.3 KB（含 3 条摘要）。
+实测：单类冷启 5–9 s（墙钟 = 最慢的源）、broad 冷启 ~13 s、缓存命中 **0.07 s**；扫描响应 5.9–7.3 KB（含 3 条摘要）。
+**没有后台任务**：缓存只在请求路径上读写，超过 5 分钟就重新抓；不做定时刷新、不做启动预热。
 
 完整设计说明：[docs/design-v0.3.md](docs/design-v0.3.md) · 上一版：[docs/design-v0.2.md](docs/design-v0.2.md)
 
@@ -37,7 +38,7 @@ radar_scan(query)
         │
         ├─ 自动判 scope（三类 / broad）· 选源（跳过 dead / 空源 / 慢源）
         ├─ 16 线程并发 + 按主机限速（arXiv 3s / Crossref 0.35s）
-        ├─ 源级缓存 5 分钟 → 热启动 0.2s
+        ├─ 源级缓存 5 分钟 → 命中 0.07s（无后台刷新）
         ├─ 归一化 → 时间窗 → 事件级去重 → 勘误过滤
         ├─ SQLite：first_seen / times_seen / source_health
         ├─ truth = 0.4·源层级 + 0.6·证据层级

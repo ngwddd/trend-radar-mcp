@@ -11,8 +11,6 @@ from __future__ import annotations
 import json
 import os
 import sys
-import threading
-import time
 import traceback
 
 from . import __version__
@@ -189,25 +187,6 @@ def handle(req: dict) -> dict | None:
             "error": {"code": -32601, "message": f"unknown method: {method}"}}
 
 
-def _warmup() -> None:
-    """Warm the source cache once at startup.
-
-    The first scan after a cold start waits on the slowest source (~3.6 s).
-    Running one broad scan in the background turns that first user-facing call
-    into a cache hit. Disable with TREND_RADAR_WARMUP=0.
-    """
-    if os.environ.get("TREND_RADAR_WARMUP", "1") == "0":
-        return
-    time.sleep(3)
-    try:
-        from .scan import scan
-        started = time.perf_counter()
-        scan(None, days=1, max_per_source=20)
-        log(f"warmup done in {time.perf_counter() - started:.1f}s")
-    except Exception as exc:  # noqa: BLE001 - warmup is best-effort
-        log("warmup failed:", type(exc).__name__, exc)
-
-
 def main() -> None:
     for stream in (sys.stdout, sys.stdin, sys.stderr):
         try:
@@ -215,7 +194,6 @@ def main() -> None:
         except (AttributeError, ValueError):
             pass
     log(f"started pid={os.getpid()} version={__version__}")
-    threading.Thread(target=_warmup, daemon=True, name="radar-warmup").start()
     for line in sys.stdin:
         line = line.strip()
         if not line:
