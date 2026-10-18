@@ -23,6 +23,7 @@ from datetime import datetime, timedelta
 from urllib.parse import urlparse
 
 from . import fetch as F
+from . import trace
 from .dedupe import event_id, is_same_event, title_tokens
 from .relevance import (classify_request, effective_keyword_count,
                         intent_keywords, keyword_coverage)
@@ -143,6 +144,9 @@ def _fetch_one(key: str, since: datetime, days: int, major_days: int,
         try:
             if time.time() - cache_path.stat().st_mtime < 300:
                 cached = json.loads(cache_path.read_text(encoding="utf-8"))
+                trace.record("source.done", key=key, status=cached.get("status"),
+                             count=len(cached.get("entries") or []), seconds=0.0,
+                             cached=True)
                 return {**cached, "seconds": 0.0, "cached": True}
         except (OSError, ValueError):
             pass
@@ -200,6 +204,8 @@ def _fetch_one(key: str, since: datetime, days: int, major_days: int,
                                 "window_start": since.date().isoformat()}
                 out["seconds"] = round(time.perf_counter() - started, 2)
                 _write_source_cache(out, cache_path)
+                trace.record("source.done", key=key, status=out["status"],
+                             count=0, seconds=out["seconds"], cached=False)
                 return out
         out["entries"] = got
     except Exception as exc:  # noqa: BLE001 - one source must not kill the run
@@ -214,6 +220,8 @@ def _fetch_one(key: str, since: datetime, days: int, major_days: int,
         out["seconds"] = round(time.perf_counter() - started, 2)
     if out["status"] in ("ok", "stale-feed"):
         _write_source_cache(out, cache_path)
+    trace.record("source.done", key=key, status=out["status"],
+                 count=len(out["entries"]), seconds=out["seconds"], cached=False)
     return out
 
 
@@ -308,6 +316,10 @@ def scan(domain: str | None = None, streams: list[str] | None = None, days: int 
         return _scan(domain, streams, int(days), int(major_days), int(max_per_source),
                      request or "", list(keywords or []), list(external or []),
                      bool(force_refresh), int(max_workers), bool(deep), store)
+    except Exception as exc:
+        trace.record("scan.error", error=f"{type(exc).__name__}: {exc}",
+                     domain=domain, days=days)
+        raise
     finally:
         if own_store:
             store.close()
@@ -332,6 +344,8 @@ def _scan(domain, streams, days, major_days, max_per_source, request, keywords,
         SOURCES[k].get("class") in requested_streams for k in keys
         if SOURCES[k].get("class") != "trend")
     run_id = store.start_run(scope, request)
+    trace.record("scan.start", run_id=run_id, scope=scope, days=days, deep=deep,
+                 max_per_source=max_per_source, streams=streams)
     F.set_cache_ttl(0 if force_refresh else 300.0)
 
     # Adaptive skip: a feed that returned 0 on its last 3 tries is not free --
@@ -375,6 +389,10 @@ def _scan(domain, streams, days, major_days, max_per_source, request, keywords,
         report.append(row)
         entries.extend(r["entries"])
     report.sort(key=lambda x: keys.index(x["source"]))
+    trace.record("scan.fetch", run_id=run_id, sources=len(report),
+                 entries=len(entries),
+                 failed=sum(1 for r in report if r["status"] not in ("ok", "stale-feed")),
+                 cached=sum(1 for r in results if r.get("cached")))
 
     # ---- supplemental-search items are scored on the platform table --------
     external_added, dropped_external = 0, 0
@@ -485,6 +503,8 @@ def _scan(domain, streams, days, major_days, max_per_source, request, keywords,
             entry["_tokens"] = toks
             seen.append(entry)
     deduped = seen
+    trace.record("scan.dedupe", run_id=run_id, kept=len(kept),
+                 deduped=len(deduped), merged=merged)
     for entry in deduped:
         entry.pop("_tokens", None)
 
@@ -796,6 +816,8 @@ def _scan(domain, streams, days, major_days, max_per_source, request, keywords,
         buckets[BUCKET_OF_SECTION.get(e.get("section") or "", "discarded")].append(e)
 
     counts = {k: len(v) for k, v in buckets.items()}
+    trace.record("scan.gate", run_id=run_id, emitted=len(capped),
+                 buckets=counts, gates=counters)
     stats = {
         "scope": scope,
         "requested_sources": len(keys),
@@ -847,5 +869,7 @@ def _scan(domain, streams, days, major_days, max_per_source, request, keywords,
     }
     path = store.finish_run(run_id, payload, stats)
     payload["file"] = str(path)
+    trace.record("scan.done", run_id=run_id, wall_s=stats["wall_seconds"],
+                 emitted=len(capped), file=str(path))
     return payload
 
