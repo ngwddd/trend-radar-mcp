@@ -6,7 +6,6 @@ audited. Ported from v1; the formulas and their evidence live in the comments.
 from __future__ import annotations
 
 import re
-from datetime import datetime, timezone
 
 from .dedupe import (
     entity_id,

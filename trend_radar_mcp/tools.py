@@ -18,7 +18,7 @@ import json
 from . import fetch as F
 from .relevance import (classify_request, effective_keyword_count,
                         intent_keywords, keyword_coverage)
-from .registry import DOMAINS, SOURCES
+from .registry import SOURCES
 from .scan import scan
 from .scoring import (CREDIBILITY_THRESHOLD, comm_weight, external_truth_weight,
                       is_customer_story, platform_of, signal_words,

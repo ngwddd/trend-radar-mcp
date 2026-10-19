@@ -15,7 +15,7 @@ import urllib.error
 import urllib.request
 from concurrent.futures import (FIRST_COMPLETED, ThreadPoolExecutor,
                                 as_completed, wait)
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 from email.utils import parsedate_to_datetime
 from html import unescape
 from xml.etree import ElementTree as ET

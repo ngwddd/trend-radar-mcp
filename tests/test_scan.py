@@ -4,7 +4,7 @@ import os
 import shutil
 import tempfile
 import unittest
-from datetime import datetime, timedelta
+from datetime import datetime
 
 from trend_radar_mcp import scan as S
 
