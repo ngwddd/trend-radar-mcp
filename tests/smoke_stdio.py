@@ -4,13 +4,17 @@ import json
 import os
 import subprocess
 import sys
+from pathlib import Path
 
 sys.stdout.reconfigure(encoding="utf-8")
-env = dict(os.environ, TREND_RADAR_HOME=r"C:\Users\ggg\Desktop\deepseek development\trend-radar-mcp\.state")
+
+# 仓库根 = 本文件上两级。不写死本机路径，换台机器 clone 下来也能跑。
+ROOT = Path(__file__).resolve().parent.parent
+env = dict(os.environ, TREND_RADAR_HOME=str(ROOT / ".state"))
 proc = subprocess.Popen([sys.executable, "-m", "trend_radar_mcp"],
                         stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                         stderr=subprocess.PIPE, text=True, encoding="utf-8",
-                        cwd=r"C:\Users\ggg\Desktop\deepseek development\trend-radar-mcp",
+                        cwd=str(ROOT),
                         env=env)
 
 

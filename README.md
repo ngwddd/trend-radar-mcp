@@ -127,7 +127,7 @@ python -m unittest discover -s tests      # 33 tests, no network
         env:
           PYTHONIOENCODING: utf-8
           PYTHONUNBUFFERED: '1'
-          TREND_RADAR_HOME: 'C:\Users\ggg\.trend-radar'
+          TREND_RADAR_HOME: 'C:\Users\<你的用户名>\.trend-radar'
         toolCallTimeoutMs: 180000
         failOnStartupError: false
 ```
