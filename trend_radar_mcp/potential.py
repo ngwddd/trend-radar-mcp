@@ -179,10 +179,18 @@ def build_candidates(payload: dict, previous: list[dict] | None = None,
     previous = previous or []
     prev_union, prev_counts, oldest = _previous_index(previous)
 
+    entries = [e for e in payload.get("entries") or [] if _eligible(e)]
+    # General outlets are tagged with several domains; in a narrow AI/science
+    # scan they can still emit a non-AI story. Only keep items that matched the
+    # scope lexicon, and only when enough of them exist.
+    scope = payload.get("domain") or payload.get("scope") or ""
+    if scope in ("ai", "science"):
+        focused = [e for e in entries if (e.get("topic_hits") or 0) > 0]
+        if len(focused) >= max(3, min(int(top), MAX_TOP)):
+            entries = focused
+
     rows = []
-    for entry in payload.get("entries") or []:
-        if not _eligible(entry):
-            continue
+    for entry in entries:
         rows.append(_score(entry, prev_union, prev_counts, oldest, now))
 
     rows.sort(key=lambda r: (-r["score"], -(r["signals"].get("velocity_per_hour") or 0)))
