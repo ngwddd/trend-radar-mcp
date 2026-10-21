@@ -11,6 +11,21 @@
 
 ---
 
+## v0.4（2026-10-21）· 潜力新闻（opt-in 支路）
+
+默认路径不变：`radar_scan` / `radar_pack` / `radar_check` 的参数、返回、耗时都不动。
+新增第 4 个工具 `radar_potential`：
+
+- **复用**同一个 `scan()` 与 5 分钟缓存；5 分钟内有同 scope 的 run 就直接读它（**0 网络**）
+- **不建新表**：每个事件的“新增独立源”从已有 `runs/*.json` 的差集算
+- 只做数值预排：新增源速度、突发率、源层级 → 8–12 条候选
+- 语义判断交给模型；`candidates` 独立命名空间，**永不与 core/watch 混排**
+- 异常只降级：无历史按层级+新鲜度、超时回退、`try/except` 不外溢
+
+凌晨热度未起时用它；它不是“已确认新闻”，每条都带 `caveat: 潜力（未验证）`。
+
+---
+
 ## v0.3（2026-10-19）· 两轮完成
 
 | 改动 | 之前 | 现在 |
@@ -59,13 +74,14 @@ radar_scan(query)
 
 ---
 
-## 工具（3 个）+ 资源
+## 工具（4 个）+ 资源
 
 | 工具 | 作用 | 硬限制 |
 |---|---|---|
 | `radar_scan` | 自动判 scope + 采集 + 评分 + 分桶 + digest + 内联摘要 | 响应 ≤8 KB；`briefs` ≤8；`top` ≤10/桶 |
 | `radar_pack` | 按 id / bucket 取正文与细节 | `ids` ≤12；`limit` ≤20；摘要 ≤600 字 |
 | `radar_check` | 发布前关联度 + 补搜条目打分 | 条目 ≤30；关键词 ≤8；补搜 ≤10 |
+| `radar_potential` | 潜力预排：新增源速度 / 突发 / 层级 → 8–12 条未验证候选 | `top` ≤12；复用 5 分钟内的 run |
 
 资源：`radar://registry`、`radar://history`、`radar://runs`、`radar://runs/{run_id}`、`radar://runs/{run_id}/entries`。
 
@@ -88,7 +104,7 @@ radar_scan(query)
 ```bash
 git clone https://github.com/ngwddd/trend-radar-mcp.git
 cd trend-radar-mcp
-python -m unittest discover -s tests      # 25 tests, no network
+python -m unittest discover -s tests      # 33 tests, no network
 ```
 
 ### 接到 DeepSeek Harness

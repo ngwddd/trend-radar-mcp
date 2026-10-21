@@ -14,11 +14,14 @@ The remaining tools are `radar_pack` (more detail for chosen ids) and
 from __future__ import annotations
 
 import json
+import time
 
 from . import fetch as F
 from .relevance import (classify_request, effective_keyword_count,
                         intent_keywords, keyword_coverage)
 from .registry import SOURCES
+from .potential import (DEFAULT_TOP, MAX_TOP, build_candidates,
+                        fallback_candidates, age_seconds, over_deadline)
 from .scan import scan
 from .scoring import (CREDIBILITY_THRESHOLD, comm_weight, external_truth_weight,
                       is_customer_story, platform_of, signal_words,
@@ -121,6 +124,37 @@ TOOLS = [
                 "summary_chars": {"type": "integer", "minimum": 120, "maximum": 600, "default": 240},
             },
             "required": ["run_id"],
+        },
+    },
+    {
+        "name": "radar_potential",
+        "description": (
+            "潜力新闻（opt-in）：用现有扫描 + 历史 run 的「新增独立源」做数值预排，"
+            "返回 8–12 条候选，交给模型判断谁最可能成为今天的爆点。"
+            "\n\n不传这个工具时 radar_scan 的返回完全不变；默认 5 分钟内直接复用上一次 run，"
+            "不重复抓取。适合凌晨热度还没起来、按「已传播」排不出东西的时候。"
+            "\n\n返回 candidates（score/signals/why）与 meta（degraded/caveat）。"
+            "caveat 固定为「未验证」，不要写成已确认新闻；不要与 core/watch 混排。"
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "用户原话，用于判 scope。"},
+                "domain": {"type": "string",
+                           "enum": ["auto", "social", "science", "ai", "broad"],
+                           "default": "auto"},
+                "days": {"type": "integer", "minimum": 1, "maximum": 7, "default": 1,
+                         "description": "回看窗口。凌晨用 1 天即可。"},
+                "top": {"type": "integer", "minimum": 3, "maximum": 12, "default": 8},
+                "max_per_source": {"type": "integer", "minimum": 5, "maximum": 50,
+                                   "default": 20},
+                "force_refresh": {"type": "boolean", "default": False},
+                "reuse_last": {"type": "boolean", "default": True,
+                               "description": "5 分钟内有同 scope 的 run 就直接复用，0 网络。"},
+                "lookback_runs": {"type": "integer", "minimum": 1, "maximum": 10,
+                                  "default": 6},
+            },
+            "required": ["query"],
         },
     },
     {
@@ -488,8 +522,78 @@ def h_check(args: dict) -> dict:
     return out
 
 
+def h_potential(args: dict) -> dict:
+    query = args.get("query") or ""
+    scope, classification = _auto_scope(query, args.get("domain"))
+    top = max(3, min(int(args.get("top", DEFAULT_TOP)), MAX_TOP))
+    days = int(args.get("days", 1))
+    store = Store()
+    payload = None
+    reused = False
+    try:
+        if bool(args.get("reuse_last", True)) and not bool(args.get("force_refresh")):
+            for meta in store.recent_runs(3):
+                run = store.get_run(meta["run_id"])
+                p = (run or {}).get("payload")
+                if not p or p.get("domain") != scope:
+                    continue
+                if int((p.get("window") or {}).get("days") or 0) != days:
+                    continue
+                age = age_seconds(p)
+                if age is not None and 0 <= age <= 300:
+                    payload, reused = p, True
+                    break
+
+        if payload is None:
+            payload = scan(
+                domain=None if scope == "broad" else scope,
+                days=days,
+                max_per_source=int(args.get("max_per_source", 20)),
+                request=query,
+                keywords=args.get("keywords") or [],
+                force_refresh=bool(args.get("force_refresh")),
+                store=store,
+            )
+
+        enrich_started = time.monotonic()
+        previous: list[dict] = []
+        lookback = max(1, min(int(args.get("lookback_runs", 6)), 10))
+        for meta in store.recent_runs(lookback + 2):
+            if meta["run_id"] == payload.get("run_id"):
+                continue
+            if over_deadline(enrich_started):
+                break
+            run = store.get_run(meta["run_id"])
+            p = (run or {}).get("payload")
+            if p and p.get("domain") == scope:
+                previous.append(p)
+            if len(previous) >= lookback:
+                break
+
+        if over_deadline(enrich_started):
+            result = fallback_candidates(payload, top, "timeout")
+        else:
+            result = build_candidates(payload, previous, top=top)
+
+        result["meta"].update({
+            "reused_run": reused,
+            "scope": scope,
+            "scope_source": classification.get("source"),
+            "classification": {"verdict": classification.get("verdict"),
+                               "confidence": classification.get("confidence")},
+            "run_id": payload.get("run_id"),
+            "window": payload.get("window"),
+        })
+        return result
+    except Exception as exc:                       # never break the other tools
+        return fallback_candidates(payload, top, f"error:{type(exc).__name__}")
+    finally:
+        store.close()
+
+
 HANDLERS = {
     "radar_scan": h_scan,
     "radar_pack": h_pack,
     "radar_check": h_check,
+    "radar_potential": h_potential,
 }

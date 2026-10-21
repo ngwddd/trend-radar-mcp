@@ -29,7 +29,7 @@ class ServerTest(unittest.TestCase):
         resp = server.handle({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
         tools = resp["result"]["tools"]
         names = {t["name"] for t in tools}
-        self.assertEqual(names, {"radar_scan", "radar_pack", "radar_check"})
+        self.assertEqual(names, {"radar_scan", "radar_pack", "radar_check", "radar_potential"})
         for t in tools:
             self.assertEqual(t["inputSchema"]["type"], "object")
 

@@ -22,7 +22,7 @@ SERVER_NAME = "trend-radar"
 PROTOCOL_VERSION = "2024-11-05"
 
 INSTRUCTIONS = """\
-trend-radar v0.3：三工具，一次调用拿到可写材料。
+trend-radar v0.4：四工具。radar_potential 是 opt-in 支路，不改变默认返回。
 
 1. 直接调 radar_scan(query="用户原话")。scope 自动判定：三类之一，判不进就 broad（42 源全开）。
    显式 domain 永远优先；返回 scope_source=auto / explicit / auto-broad 可审计。
@@ -36,6 +36,8 @@ trend-radar v0.3：三工具，一次调用拿到可写材料。
 6. 写简报：每条带 URL 与日期；预印本不写已发表；厂商自述不算独立验证；
    覆盖披露必须含失败源、降级流、跳过的空源。
 7. 预算：radar_scan ≈6–8 KB，radar_pack ≈3 KB。默认值够用就不要加参数。
+8. 只有用户要「潜力/预判/凌晨没热度」时才调 radar_potential：返回 candidates（未验证），
+   不要写成已确认新闻，也不要把 candidates 混进 core/watch 的引用里。
 """
 
 
