@@ -79,6 +79,11 @@ score = 100 × (0.50 × velocity_norm + 0.30 × burst_norm + 0.20 × tier)
 
 `candidates` 永不与 `core` / `watch` 混排；模型负责语义判断与最终 3–5 条。
 
+## 自动触发（v0.4.1）
+
+本地 00:00–07:00，且 `radar_scan` 的 `core` 为空、或今天 `new=true` 的条目少于 3 条时，模型自动再调一次 `radar_potential`，不询问用户；简报末尾单独列「潜力（未验证）」。
+其它时段只有用户明确要求才调用。
+
 ## 测试
 
 - `tests/test_potential.py`：无历史封顶、历史速度、促销/热榜过滤、同源上限、降级

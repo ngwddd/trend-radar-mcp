@@ -36,8 +36,13 @@ trend-radar v0.4：四工具。radar_potential 是 opt-in 支路，不改变默�
 6. 写简报：每条带 URL 与日期；预印本不写已发表；厂商自述不算独立验证；
    覆盖披露必须含失败源、降级流、跳过的空源。
 7. 预算：radar_scan ≈6–8 KB，radar_pack ≈3 KB。默认值够用就不要加参数。
-8. 只有用户要「潜力/预判/凌晨没热度」时才调 radar_potential：返回 candidates（未验证），
-   不要写成已确认新闻，也不要把 candidates 混进 core/watch 的引用里。
+8. 凌晨自动补潜力（不要问用户）：当地时间是 00:00–07:00，且 radar_scan 显示「今天」很薄
+   （core 为空，或 digest/picks 里 new=true 的条目少于 3 条）时，直接再调
+   radar_potential(query=同一句, days=1, top=5)，在简报末尾单独加「潜力（未验证）」一节，
+   并写一句「刚过 0 点，传播还没起来，补一组潜力候选」。
+   其它时段不主动调用；用户明确要潜力时随时调用。
+9. radar_potential 的 candidates 永远标「未验证」：不写成已确认新闻，不混进 core/watch 的引用。
+   若返回 degraded/空，直说「今天信号还不够」，不要硬凑。
 """
 
 

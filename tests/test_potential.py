@@ -4,6 +4,7 @@ import unittest
 from datetime import datetime
 
 from trend_radar_mcp.potential import build_candidates, fallback_candidates
+from trend_radar_mcp.server import INSTRUCTIONS
 from trend_radar_mcp.tools import HANDLERS, TOOLS
 
 
@@ -68,6 +69,11 @@ class PotentialRegistrationTest(unittest.TestCase):
         names = {t["name"] for t in TOOLS}
         self.assertIn("radar_potential", names)
         self.assertIn("radar_potential", HANDLERS)
+
+    def test_early_morning_auto_rule_is_documented(self):
+        self.assertIn("00:00–07:00", INSTRUCTIONS)
+        self.assertIn("不要问用户", INSTRUCTIONS)
+        self.assertIn("new=true", INSTRUCTIONS)
 
     def test_tool_schema_is_opt_in(self):
         tool = next(t for t in TOOLS if t["name"] == "radar_potential")
