@@ -70,10 +70,10 @@ class PotentialRegistrationTest(unittest.TestCase):
         self.assertIn("radar_potential", names)
         self.assertIn("radar_potential", HANDLERS)
 
-    def test_early_morning_auto_rule_is_documented(self):
-        self.assertIn("00:00–07:00", INSTRUCTIONS)
+    def test_no_hot_news_auto_rule_is_documented(self):
+        self.assertIn("任何时间", INSTRUCTIONS)
         self.assertIn("不要问用户", INSTRUCTIONS)
-        self.assertIn("new=true", INSTRUCTIONS)
+        self.assertIn("只有论文", INSTRUCTIONS)
 
     def test_tool_schema_is_opt_in(self):
         tool = next(t for t in TOOLS if t["name"] == "radar_potential")

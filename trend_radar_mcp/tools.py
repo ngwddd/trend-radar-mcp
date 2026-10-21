@@ -354,8 +354,7 @@ def h_scan(args: dict) -> dict:
             "skipped_empty_sources": skipped,
             "stream_fallback": payload.get("stream_fallback", False),
         },
-        "notice": ("core 为空：今天没有同时通过真值与传播闸门的条目；"
-                   "watch 是可信但尚未被独立转载的" if not digest["core"] else ""),
+        "notice": _core_notice(payload),
         "next": ("digest + briefs 已够写就直接写；不够再 radar_pack(ids≤12, fields=['summary'])；"
                  "写完用 radar_check 量关联度。"),
     }
@@ -379,6 +378,34 @@ def _fit(result: dict, limit: int = 8000) -> dict:
         result["briefs"]["watch"].pop()
         text = json.dumps(result, ensure_ascii=False)
     return result
+
+
+
+
+def _core_notice(payload: dict) -> str:
+    """Tell the model when today has no hot, corroborated core story.
+
+    core being empty is the obvious case; the second case is a core made only
+    of peer-reviewed single-source papers — real work, but not today's news.
+    """
+    core = [e for e in payload.get("entries") or []
+            if (e.get("bucket") or "") == "core"]
+    today = (payload.get("window") or {}).get("until") or ""
+
+    def is_hot(e: dict) -> bool:
+        if e.get("single_source_hard_evidence"):
+            return False
+        d = (e.get("published") or e.get("first_seen") or "")[:10]
+        return bool(d) and (not today or d == today)
+
+    if not core:
+        return ("core 为空：今天没有同时通过真值与传播闸门的条目；"
+                "watch 是可信但尚未被独立转载的。"
+                "请直接调 radar_potential 补一组潜力候选（不要问用户）。")
+    if not any(is_hot(e) for e in core):
+        return ("core 里只有论文/单源硬证据，今天还没有热点新闻；"
+                "请直接调 radar_potential 补一组潜力候选（不要问用户）。")
+    return ""
 
 
 def _project(e: dict, fields: set[str], chars: int) -> dict:
