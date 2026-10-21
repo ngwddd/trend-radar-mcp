@@ -106,7 +106,7 @@ radar_scan(query)
 ```bash
 git clone https://github.com/ngwddd/trend-radar-mcp.git
 cd trend-radar-mcp
-python -m unittest discover -s tests      # 33 tests, no network
+python -m unittest discover -s tests      # 38 tests, no network
 ```
 
 ### 接到 DeepSeek Harness
